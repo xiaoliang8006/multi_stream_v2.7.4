@@ -118,6 +118,8 @@ class DeviceContext : public core::RefCounted {
 
   // check if device is a pluggable device
   virtual bool IsPluggableDevice() { return false; }
+
+  virtual int stream_id() const { return 0; }
 };
 
 class DeviceBase {
@@ -275,11 +277,20 @@ class DeviceBase {
                           "CopyTensorInSameDevice"));
   }
 
+  // Sets the stream index of a stream device.
+  void SetStreamId(int stream_id) { stream_id_ = stream_id; }
+
+  // Gets the stream index of a stream device.
+  int GetStreamId() { return stream_id_; }
+
  protected:
   // Does not take ownership.
   void set_tensorflow_device_thread_pool(thread::ThreadPool* thread_pool) {
     device_thread_pool_ = thread_pool;
   }
+
+  // Stream index of a stream device.
+  int stream_id_ = 0;
 
  private:
   Env* const env_;

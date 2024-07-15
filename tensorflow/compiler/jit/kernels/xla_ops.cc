@@ -187,9 +187,16 @@ static Status CompileToLocalExecutable(
     return errors::Internal("No resource manager.");
   }
 
+  // Create multiple compilers for multiple stream groups, thus multiple clients
+  // and multiple backends. (Is this necessary? Can the clients share the same
+  // compiler?)
   XlaCompilationCache* cache;
+  int stream_id = ctx->device()->GetStreamId();
+  std::string name = stream_id > 0
+                         ? strings::StrCat("xla_cache_", stream_id)
+                         : "xla_cache";
   TF_RETURN_IF_ERROR(rm->LookupOrCreate<XlaCompilationCache>(
-      rm->default_container(), "xla_cache", &cache,
+      rm->default_container(), name, &cache,
       [&](XlaCompilationCache** cache) {
         return BuildXlaCompilationCache(ctx->device(), ctx->function_library(),
                                         platform_info, cache);

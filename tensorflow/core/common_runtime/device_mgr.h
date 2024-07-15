@@ -72,43 +72,15 @@ class DeviceMgr {
   // nullptr.
   virtual Device* HostCPU() const = 0;
 
+  // Get the number of stream groups.
+  virtual int StreamGroupCount() const = 0;
+
+  // Assigns *device with pointer to StreamDevice of the device of the
+  // given name and given stream_id.
+  virtual Device* LookupStream(const Device* device,
+                               const int stream_id) const = 0;
+
   TF_DISALLOW_COPY_AND_ASSIGN(DeviceMgr);
-};
-
-// Represents a static set of devices.
-class StaticDeviceMgr : public DeviceMgr {
- public:
-  // Constructs a StaticDeviceMgr from a list of devices.
-  explicit StaticDeviceMgr(std::vector<std::unique_ptr<Device>> devices);
-
-  // Constructs a StaticDeviceMgr managing a single device.
-  explicit StaticDeviceMgr(std::unique_ptr<Device> device);
-
-  ~StaticDeviceMgr() override;
-
-  void ListDeviceAttributes(
-      std::vector<DeviceAttributes>* devices) const override;
-  std::vector<Device*> ListDevices() const override;
-  string DebugString() const override;
-  string DeviceMappingString() const override;
-  Status LookupDevice(StringPiece name, Device** device) const override;
-  bool ContainsDevice(int64_t device_incarnation) const override;
-  void ClearContainers(gtl::ArraySlice<string> containers) const override;
-  int NumDeviceType(const string& type) const override;
-  Device* HostCPU() const override;
-
- private:
-  const std::vector<std::unique_ptr<Device>> devices_;
-
-  StringPiece CopyToBackingStore(StringPiece s);
-
-  absl::flat_hash_set<int64_t> device_incarnation_set_;
-  std::unordered_map<StringPiece, Device*, StringPieceHasher> device_map_;
-  core::Arena name_backing_store_;  // Storage for keys in device_map_
-  std::unordered_map<string, int> device_type_counts_;
-  Device* cpu_device_;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(StaticDeviceMgr);
 };
 
 // Size of stale device buffer for temporary storage of removed devices.
@@ -121,8 +93,8 @@ class DynamicDeviceMgr : public DeviceMgr {
   DynamicDeviceMgr();
 
   // Constructs a DynamicDeviceMgr from a list of devices.
-  // TODO(b/183966398): Remove StaticDeviceMgr since there's no usage.
   explicit DynamicDeviceMgr(std::vector<std::unique_ptr<Device>> devices);
+  explicit DynamicDeviceMgr(std::unique_ptr<Device>&& device);
 
   ~DynamicDeviceMgr() override;
 
@@ -136,6 +108,9 @@ class DynamicDeviceMgr : public DeviceMgr {
   void ClearContainers(gtl::ArraySlice<string> containers) const override;
   int NumDeviceType(const string& type) const override;
   Device* HostCPU() const override;
+  int StreamGroupCount() const override;
+  Device* LookupStream(const Device* device,
+                       const int stream_id) const override;
 
   // Add devices to device manager. Returns error for repeated device names.
   Status AddDevices(std::vector<std::unique_ptr<Device>> devices);
@@ -187,8 +162,18 @@ class DynamicDeviceMgr : public DeviceMgr {
   // buffer only for that purpose.
   DeviceCircularBuffer stale_devices_ TF_GUARDED_BY(devices_mu_);
 
+  // Initialize the multi-stream related information.
+  void InitStreamDevice();
+
+  int stream_group_count_;
+  std::unordered_map<const Device*, std::vector<Device*>> stream_device_map_;
+  
   TF_DISALLOW_COPY_AND_ASSIGN(DynamicDeviceMgr);
 };
+
+// TODO(b/183966398): Remove StaticDeviceMgr since there's no usage.
+using StaticDeviceMgr = DynamicDeviceMgr;
+
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_CORE_COMMON_RUNTIME_DEVICE_MGR_H_

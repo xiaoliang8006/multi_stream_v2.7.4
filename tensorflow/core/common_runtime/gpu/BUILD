@@ -155,6 +155,7 @@ tf_cuda_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/util:env_var",
         "//tensorflow/core/common_runtime:core_cpu_impl",
         "//tensorflow/core/common_runtime:node_file_writer",
         "//tensorflow/core/platform:stream_executor",
@@ -203,6 +204,7 @@ tf_cuda_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/common_runtime:bfc_allocator",
         "//tensorflow/core/common_runtime/device:device_mem_allocator",
+        "@com_google_absl//absl/types:optional",
     ],
 )
 

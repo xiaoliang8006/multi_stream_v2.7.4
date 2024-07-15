@@ -56,7 +56,8 @@ class PlatformUtil {
   // If the platform has no visible devices, a not-found error is returned.
   static StatusOr<std::vector<se::StreamExecutor*>> GetStreamExecutors(
       se::Platform* platform,
-      const absl::optional<std::set<int>>& allowed_devices = absl::nullopt);
+      const absl::optional<std::set<int>>& allowed_devices = absl::nullopt,
+      const int stream_id = 0);
 
  private:
   TF_DISALLOW_COPY_AND_ASSIGN(PlatformUtil);

@@ -590,11 +590,13 @@ cc_library(
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:numbers",
         "//tensorflow/core/platform:status",
+        "//tensorflow/core/platform:statusor",
         "//tensorflow/core/platform:str_util",
         "//tensorflow/core/platform:strcat",
         "//tensorflow/core/platform:stringpiece",
         "//tensorflow/core/platform:types",
     ],
+    visibility = ["//tensorflow:__subpackages__"],
 )
 
 cc_library(

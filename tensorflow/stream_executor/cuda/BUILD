@@ -125,10 +125,12 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@local_config_cuda//cuda:cuda_headers",
         "//tensorflow/stream_executor:device_options",
+        "//tensorflow/stream_executor:platform",
         "//tensorflow/stream_executor/gpu:gpu_driver_header",
         "//tensorflow/stream_executor/lib",
         "//tensorflow/stream_executor/platform",
         "//tensorflow/stream_executor/platform:dso_loader",
+        "//tensorflow/core/util:env_var",
     ] + tf_additional_cuda_driver_deps()) + select({
         # include dynamic loading implementation only when if_cuda_is_configured and build dynamically
         "//tensorflow:is_cuda_enabled_and_oss": ["cudart_stub"],

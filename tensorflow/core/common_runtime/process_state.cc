@@ -100,9 +100,10 @@ Allocator* ProcessState::GetCPUAllocator(int numa_node) {
       }
       int64_t cpu_mem_limit = cpu_mem_limit_in_mb * (1LL << 20);
       DCHECK(sub_allocator);
+      BFCAllocator::Options opts;
       allocator =
           new BFCAllocator(sub_allocator, cpu_mem_limit, /*allow_growth=*/true,
-                           /*name=*/"bfc_cpu_allocator_for_gpu");
+                           /*name=*/"bfc_cpu_allocator_for_gpu", opts);
       VLOG(2) << "Using BFCAllocator with memory limit of "
               << cpu_mem_limit_in_mb << " MB for ProcessState CPU allocator";
     } else if (sub_allocator) {

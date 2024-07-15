@@ -85,9 +85,32 @@ GPUBFCAllocator::GPUBFCAllocator(SubAllocator* sub_allocator,
                                  const string& name,
                                  double fragmentation_fraction)
     : BFCAllocator(sub_allocator, total_memory,
-                   GPUBFCAllocator::GetAllowGrowthValue(gpu_options), name,
-                   GPUBFCAllocator::GetGarbageCollectionValue()) {
+                   GPUBFCAllocator::GetAllowGrowthValue(gpu_options), name, [&] {
+            BFCAllocator::Options o;
+            o.garbage_collection = GPUBFCAllocator::GetGarbageCollectionValue();
+            return o;
+          }()) {
   SetInternalFragmentationFraction(fragmentation_fraction);
 }
+
+GPUBFCAllocator::GPUBFCAllocator(
+    SubAllocator* sub_allocator, size_t total_memory,
+    const std::string& name, const Options& opts)
+    : BFCAllocator(sub_allocator, total_memory, 
+      opts.allow_growth, name, [&] {
+        BFCAllocator::Options o;
+        o.allow_growth = opts.allow_growth;
+        o.allow_retry_on_failure = opts.allow_retry_on_failure;
+        if (opts.garbage_collection.has_value()) {
+          o.garbage_collection = *opts.garbage_collection;
+        } else {
+          o.garbage_collection = GPUBFCAllocator::GetGarbageCollectionValue();
+        }
+        o.fragmentation_fraction = opts.fragmentation_fraction;
+        o.share_memory_pool = opts.share_memory_pool;
+        o.shared_pool_lock = opts.shared_pool_lock;
+        o.shared_pool_bytes = opts.shared_pool_bytes;
+        return o;
+      }()) {}
 
 }  // namespace tensorflow

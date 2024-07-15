@@ -84,7 +84,10 @@ PluggableDeviceBFCAllocator::PluggableDeviceBFCAllocator(
     const GPUOptions& gpu_options, const string& name)
     : BFCAllocator(
           sub_allocator, total_memory,
-          PluggableDeviceBFCAllocator::GetAllowGrowthValue(gpu_options), name,
-          PluggableDeviceBFCAllocator::GetGarbageCollectionValue()) {}
+          PluggableDeviceBFCAllocator::GetAllowGrowthValue(gpu_options), name, [&] {
+            BFCAllocator::Options o;
+            o.garbage_collection = PluggableDeviceBFCAllocator::GetGarbageCollectionValue();
+            return o;
+          }()) {}
 
 }  // namespace tensorflow

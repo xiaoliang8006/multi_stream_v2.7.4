@@ -76,10 +76,11 @@ void InitMask(se::StreamExecutor* exec, void* ptr, int64_t* mask) {
 // GPUDebugAllocator
 // -----------------------------------------------------------------------------
 GPUDebugAllocator::GPUDebugAllocator(Allocator* allocator,
-                                     PlatformDeviceId platform_device_id)
+                                     PlatformDeviceId platform_device_id,
+                                     int stream_id)
     : base_allocator_(allocator) {
   stream_exec_ = DeviceIdUtil::ExecutorForPlatformDeviceId(GPUMachineManager(),
-                                                           platform_device_id)
+                                                           platform_device_id, stream_id)
                      .ValueOrDie();
 }
 
@@ -155,10 +156,11 @@ bool GPUDebugAllocator::CheckFooter(void* ptr) {
 // GPUNanResetAllocator
 // -----------------------------------------------------------------------------
 GPUNanResetAllocator::GPUNanResetAllocator(Allocator* allocator,
-                                           PlatformDeviceId platform_device_id)
+                                           PlatformDeviceId platform_device_id,
+                                           int stream_id)
     : base_allocator_(allocator) {
   stream_exec_ = DeviceIdUtil::ExecutorForPlatformDeviceId(GPUMachineManager(),
-                                                           platform_device_id)
+                                                           platform_device_id, stream_id)
                      .ValueOrDie();
 }
 

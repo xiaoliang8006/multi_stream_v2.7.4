@@ -211,6 +211,9 @@ message GPUOptions {
 
     // When true, use CUDA cudaMallocAsync API instead of TF gpu allocator.
     bool use_cuda_malloc_async = 11;
+
+    // When true, disable retry on allocation failure.
+    bool disallow_retry_on_allocation_failure = 12;
   }
 
   // Everything inside experimental is subject to change and is not subject
