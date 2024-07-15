@@ -21,6 +21,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "absl/types/optional.h"
+#include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/common_runtime/bfc_allocator.h"
 #include "tensorflow/core/common_runtime/device/device_mem_allocator.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_virtual_mem_allocator.h"
@@ -34,11 +36,36 @@ namespace tensorflow {
 // algorithm.
 class GPUBFCAllocator : public BFCAllocator {
  public:
+  // See BFCAllocator::Options.
+  struct Options {
+    // Overridden by TF_FORCE_GPU_ALLOW_GROWTH if that envvar is set.
+    bool allow_growth = false;
+
+    // If nullopt, defaults to TF_ENABLE_GPU_GARBAGE_COLLECTION, or true if that
+    // envvar is not present.
+    //
+    // Note:
+    //
+    //  - BFCAllocator defaults garbage_collection to false, not true.
+    //  - this is not the same override behavior as TF_FORCE_GPU_ALLOW_GROWTH.
+    absl::optional<bool> garbage_collection;
+
+    double fragmentation_fraction = 0;
+    bool allow_retry_on_failure = true;
+
+    // Set shared pool.
+    bool share_memory_pool = false;
+    mutex* shared_pool_lock = nullptr;
+    int64_t* shared_pool_bytes = nullptr;
+  };
+
   GPUBFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
                   const string& name, double fragmentation_fraction = 0.0);
   GPUBFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
                   const GPUOptions& gpu_options, const string& name,
                   double fragmentation_fraction = 0.0);
+  GPUBFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
+                  const string& name, const Options& opts);
   ~GPUBFCAllocator() override {}
 
   TF_DISALLOW_COPY_AND_ASSIGN(GPUBFCAllocator);

@@ -40,8 +40,8 @@ constexpr BFCAllocator::ChunkHandle BFCAllocator::kInvalidChunkHandle;
 
 BFCAllocator::BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
                            bool allow_growth, const string& name,
-                           bool garbage_collection)
-    : garbage_collection_(garbage_collection),
+                           const Options& opts)
+    : garbage_collection_(opts.garbage_collection),
       coalesce_regions_(sub_allocator->SupportsCoalescing()),
       sub_allocator_(sub_allocator),
       name_(name),
@@ -59,6 +59,11 @@ BFCAllocator::BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
   // Allocate the requested amount of memory.
   memory_limit_ = total_memory;
   stats_.bytes_limit = static_cast<int64_t>(total_memory);
+
+  // Set shared pool.
+  stats_.share_memory_pool = opts.share_memory_pool;
+  stats_.shared_pool_lock = opts.shared_pool_lock;
+  stats_.shared_pool_bytes = opts.shared_pool_bytes;
 
   // Create a bunch of bins of various good sizes.
 
@@ -106,7 +111,13 @@ const BFCAllocator::Chunk* BFCAllocator::ChunkFromHandle(ChunkHandle h) const {
 }
 
 bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
-  size_t available_bytes = memory_limit_ - total_region_allocated_bytes_;
+  size_t available_bytes;
+  if (stats_.share_memory_pool) {
+    mutex_lock l(*stats_.shared_pool_lock);
+    available_bytes = memory_limit_ - *stats_.shared_pool_bytes;
+  } else {
+    available_bytes = memory_limit_ - total_region_allocated_bytes_;
+  }
   // Rounds available_bytes down to the nearest multiple of kMinAllocationSize.
   available_bytes = (available_bytes / kMinAllocationSize) * kMinAllocationSize;
 
@@ -159,6 +170,13 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
   total_region_allocated_bytes_ += bytes_received;
   VLOG(1) << "Total allocated bytes: "
           << strings::HumanReadableNumBytes(total_region_allocated_bytes_);
+
+  if (stats_.share_memory_pool) {
+    mutex_lock l(*stats_.shared_pool_lock);
+    *stats_.shared_pool_bytes += bytes_received;
+    VLOG(1) << "Total allocated shared bytes: "
+            << strings::HumanReadableNumBytes(*stats_.shared_pool_bytes);
+  }
 
   VLOG(1) << "Allocated memory at " << mem_addr << " to "
           << static_cast<void*>(static_cast<char*>(mem_addr) + bytes_received);
@@ -334,8 +352,14 @@ bool BFCAllocator::DeallocateFreeRegions(size_t rounded_bytes)
   }
 
   // Rough estimation to check whether deallocation can help.
-  size_t available_bytes =
-      memory_limit_ - total_region_allocated_bytes_ + total_free_bytes;
+  size_t available_bytes;
+  if (stats_.share_memory_pool) {
+    mutex_lock l(*stats_.shared_pool_lock);
+    available_bytes =
+        memory_limit_ - *stats_.shared_pool_bytes + total_free_bytes;
+  } else {
+    available_bytes = memory_limit_ - total_region_allocated_bytes_ + total_free_bytes;
+  }
   if (rounded_bytes > available_bytes) {
     return false;
   }
@@ -387,6 +411,10 @@ void BFCAllocator::DeallocateRegions(
     // Deallocate the memory.
     sub_allocator_->Free(it->ptr(), it->memory_size());
     total_region_allocated_bytes_ -= it->memory_size();
+    if (stats_.share_memory_pool) {
+      mutex_lock l(*stats_.shared_pool_lock);
+      *stats_.shared_pool_bytes -= it->memory_size();
+    }
     it = region_manager_.RemoveAllocationRegion(it);
   }
 }
@@ -1083,6 +1111,9 @@ void BFCAllocator::DumpMemoryLog(size_t num_bytes) {
             << (memory_limit_ - total_region_allocated_bytes_)
             << " curr_region_allocation_bytes_: "
             << curr_region_allocation_bytes_;
+  if (stats_.share_memory_pool) {
+    LOG(INFO) << "Total bytes in shared pool: " << *stats_.shared_pool_bytes;
+  }
   LOG(INFO) << "Stats: \n" << stats_.DebugString();
 }
 

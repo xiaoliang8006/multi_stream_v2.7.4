@@ -34,16 +34,29 @@ class DeviceIdUtil {
   // Convenient methods for getting the associated executor given a TfDeviceId
   // or PlatformDeviceId.
   static se::port::StatusOr<se::StreamExecutor*> ExecutorForPlatformDeviceId(
+      se::Platform* device_manager, PlatformDeviceId platform_device_id,
+      int stream_id) {
+    return device_manager->ExecutorForDevice(platform_device_id.value(),
+                                             stream_id);
+  }
+  static se::port::StatusOr<se::StreamExecutor*> ExecutorForPlatformDeviceId(
       se::Platform* device_manager, PlatformDeviceId platform_device_id) {
-    return device_manager->ExecutorForDevice(platform_device_id.value());
+     return ExecutorForPlatformDeviceId(device_manager, platform_device_id, 0);
   }
   static se::port::StatusOr<se::StreamExecutor*> ExecutorForTfDeviceId(
       const DeviceType& type, se::Platform* device_manager,
-      TfDeviceId tf_device_id) {
+      TfDeviceId tf_device_id, int stream_id) {
     PlatformDeviceId platform_device_id;
     TF_RETURN_IF_ERROR(DeviceIdManager::TfToPlatformDeviceId(
         type, tf_device_id, &platform_device_id));
-    return ExecutorForPlatformDeviceId(device_manager, platform_device_id);
+    return ExecutorForPlatformDeviceId(device_manager, platform_device_id,
+                                       stream_id);
+  }
+
+  static se::port::StatusOr<se::StreamExecutor*> ExecutorForTfDeviceId(
+      const DeviceType& type, se::Platform* device_manager,
+      TfDeviceId tf_device_id) {
+    return ExecutorForTfDeviceId(type, device_manager, tf_device_id, 0);
   }
 
   // Verify that the platform_device_id associated with a TfDeviceId is

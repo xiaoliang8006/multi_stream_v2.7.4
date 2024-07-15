@@ -30,7 +30,8 @@ namespace tensorflow {
 // free memory.
 class GPUcudaMallocAllocator : public Allocator {
  public:
-  explicit GPUcudaMallocAllocator(PlatformDeviceId platform_device_id);
+  explicit GPUcudaMallocAllocator(PlatformDeviceId platform_device_id,
+                                  int stream_id = 0);
   string Name() override { return "gpu_debug"; }
   void* AllocateRaw(size_t alignment, size_t num_bytes) override;
   void DeallocateRaw(void* ptr) override;

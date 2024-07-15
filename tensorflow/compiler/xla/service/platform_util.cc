@@ -160,8 +160,8 @@ static bool IsDeviceSupported(se::StreamExecutor* executor) {
 
 /* static */ StatusOr<std::vector<se::StreamExecutor*>>
 PlatformUtil::GetStreamExecutors(
-    se::Platform* platform,
-    const absl::optional<std::set<int>>& allowed_devices) {
+    se::Platform* platform, const absl::optional<std::set<int>>& allowed_devices,
+    const int stream_id) {
   int device_count = platform->VisibleDeviceCount();
   if (device_count <= 0) {
     return NotFound("no %s devices found", platform->Name());
@@ -193,9 +193,10 @@ PlatformUtil::GetStreamExecutors(
                 << " since it is not in the visible device list";
         continue;
       }
-      thread_pool.Schedule([platform, i, &stream_executors]() {
+      thread_pool.Schedule([stream_id, platform, i, &stream_executors]() {
         VLOG(1) << "Started device init " << i;
-        auto executor_status = platform->ExecutorForDevice(i);
+        auto executor_status = 
+            platform->ExecutorForDevice(i, stream_id);
         if (executor_status.ok()) {
           se::StreamExecutor* executor = executor_status.ValueOrDie();
           if (IsDeviceSupported(executor)) {
@@ -204,7 +205,7 @@ PlatformUtil::GetStreamExecutors(
         } else {
           LOG(WARNING) << "unable to create StreamExecutor for "
                        << platform->Name() << ":" << i << ": "
-                       << executor_status.status().error_message();
+                       << stream_id << ": " << executor_status.status().error_message();
         }
         VLOG(1) << "Finished device init " << i;
       });

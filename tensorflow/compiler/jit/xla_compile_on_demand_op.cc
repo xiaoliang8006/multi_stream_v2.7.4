@@ -123,8 +123,13 @@ Status XlaCompileOnDemandOp::Compile(
   ResourceMgr* rm = ctx->resource_manager();
   CHECK(rm);
 
+
+  int stream_id = ctx->device()->GetStreamId();
+  std::string name = stream_id > 0
+                         ? strings::StrCat("xla_cache_", stream_id)
+                         : "xla_cache";
   TF_RETURN_IF_ERROR(rm->LookupOrCreate<XlaCompilationCache>(
-      rm->default_container(), "xla_cache", cache,
+      rm->default_container(), name, cache,
       [&](XlaCompilationCache** write_into_cache) {
         return BuildXlaCompilationCache(ctx->device(), ctx->function_library(),
                                         platform_info_, write_into_cache);

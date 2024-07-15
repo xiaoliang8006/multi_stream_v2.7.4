@@ -119,8 +119,12 @@ StatusOr<std::string> GetCompilerIr(
   XlaPlatformInfo platform_info = XlaPlatformInfoFromDevice(dev);
 
   XlaCompilationCache* cache;
+  int stream_id = dev->GetStreamId();
+  std::string name = stream_id > 0
+                         ? strings::StrCat("xla_cache_", stream_id)
+                         : "xla_cache";
   TF_RETURN_IF_ERROR(rmgr->LookupOrCreate<XlaCompilationCache>(
-      rmgr->default_container(), "xla_cache", &cache,
+      rmgr->default_container(), name, &cache,
       [&](XlaCompilationCache** cache_write_into) {
         return BuildXlaCompilationCache(dev, flr, platform_info,
                                         cache_write_into);

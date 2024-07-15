@@ -154,4 +154,13 @@ int StaticDeviceMgr::NumDeviceType(const string& type) const {
 
 Device* StaticDeviceMgr::HostCPU() const { return cpu_device_; }
 
+int StaticDeviceMgr::StreamGroupCount() const {
+  return 0;
+}
+
+Device* StaticDeviceMgr::LookupStream(const Device* device,
+                                       const int stream_id) const {
+  return nullptr;
+}
+
 }  // namespace tensorflow

@@ -27,9 +27,9 @@ limitations under the License.
 namespace tensorflow {
 
 GPUcudaMallocAllocator::GPUcudaMallocAllocator(
-    PlatformDeviceId platform_device_id) {
+    PlatformDeviceId platform_device_id, int stream_id) {
   stream_exec_ = DeviceIdUtil::ExecutorForPlatformDeviceId(GPUMachineManager(),
-                                                           platform_device_id)
+                                                           platform_device_id, stream_id)
                      .ValueOrDie();
 }
 

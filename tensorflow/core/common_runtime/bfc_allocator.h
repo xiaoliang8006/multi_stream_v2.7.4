@@ -48,10 +48,34 @@ class MemoryDump;
 // all requests to allocate memory go through this interface.
 class BFCAllocator : public Allocator {
  public:
+  struct Options {
+    bool allow_growth = true;
+
+    // If true, the allocator may sleep for a period of time when it can't
+    // fulfill an allocation request, in the hopes that another thread will free
+    // up memory in the meantime.
+    //
+    // If false, the allocator will never sleep, even if
+    // AllocationAttributes::attr_retry_on_failure is true.
+    bool allow_retry_on_failure = true;
+
+    // Whether the allocator will deallocate free regions to avoid OOM due to
+    // memory fragmentation.
+    bool garbage_collection = false;
+
+    // Controls when a chunk should be split, if its size exceeds the requested
+    // allocation size.
+    double fragmentation_fraction = 0;
+
+    // Set shared pool.
+    bool share_memory_pool = false;
+    mutex* shared_pool_lock = nullptr;
+    int64_t* shared_pool_bytes = nullptr;
+  };
   // Takes ownership of sub_allocator.
   BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
                bool allow_growth, const string& name,
-               bool garbage_collection = false);
+               const Options& opts);
   ~BFCAllocator() override;
 
   string Name() override { return name_; }

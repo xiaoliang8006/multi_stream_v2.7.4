@@ -88,6 +88,7 @@ Status BuildXlaCompilationCache(DeviceBase* device, FunctionLibraryRuntime* flr,
     TF_ASSIGN_OR_RETURN(absl::optional<std::set<int>> gpu_ids,
                         ParseVisibleDeviceList(allowed_gpus));
     client_options.set_allowed_devices(gpu_ids);
+    client_options.set_gpu_stream_group_index(device->GetStreamId());
   }
 
   auto client = xla::ClientLibrary::GetOrCreateLocalClient(client_options);

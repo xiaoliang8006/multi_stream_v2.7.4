@@ -72,6 +72,14 @@ class DeviceMgr {
   // nullptr.
   virtual Device* HostCPU() const = 0;
 
+  // Get the number of stream groups.
+  virtual int StreamGroupCount() const = 0;
+
+  // Assigns *device with pointer to StreamDevice of the device of the
+  // given name and given stream_id.
+  virtual Device* LookupStream(const Device* device,
+                               const int stream_id) const = 0;
+
   TF_DISALLOW_COPY_AND_ASSIGN(DeviceMgr);
 };
 
@@ -96,6 +104,9 @@ class StaticDeviceMgr : public DeviceMgr {
   void ClearContainers(gtl::ArraySlice<string> containers) const override;
   int NumDeviceType(const string& type) const override;
   Device* HostCPU() const override;
+  int StreamGroupCount() const override;
+  Device* LookupStream(const Device* device,
+                       const int stream_id) const override;
 
  private:
   const std::vector<std::unique_ptr<Device>> devices_;
@@ -136,6 +147,9 @@ class DynamicDeviceMgr : public DeviceMgr {
   void ClearContainers(gtl::ArraySlice<string> containers) const override;
   int NumDeviceType(const string& type) const override;
   Device* HostCPU() const override;
+  int StreamGroupCount() const override;
+  Device* LookupStream(const Device* device,
+                       const int stream_id) const override;
 
   // Add devices to device manager. Returns error for repeated device names.
   Status AddDevices(std::vector<std::unique_ptr<Device>> devices);
@@ -187,6 +201,12 @@ class DynamicDeviceMgr : public DeviceMgr {
   // buffer only for that purpose.
   DeviceCircularBuffer stale_devices_ TF_GUARDED_BY(devices_mu_);
 
+  // Initialize the multi-stream related information.
+  void InitStreamDevice();
+
+  int stream_group_count_;
+  std::unordered_map<const Device*, std::vector<Device*>> stream_device_map_;
+  
   TF_DISALLOW_COPY_AND_ASSIGN(DynamicDeviceMgr);
 };
 }  // namespace tensorflow
