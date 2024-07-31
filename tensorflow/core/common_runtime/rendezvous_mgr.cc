@@ -75,6 +75,7 @@ void SameWorkerRecvDone(const DeviceMgr* device_mgr,
     done(s);
     return;
   }
+
   if (src_device->parsed_name().type == "GPU") {
     src_device = device_mgr->LookupStream(
         src_device, send_args.device_context->stream_id());

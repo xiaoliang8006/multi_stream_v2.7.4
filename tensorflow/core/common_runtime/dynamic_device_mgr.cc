@@ -48,6 +48,13 @@ DynamicDeviceMgr::DynamicDeviceMgr(
   }
 }
 
+DynamicDeviceMgr::DynamicDeviceMgr(std::unique_ptr<Device>&& device)
+    : DynamicDeviceMgr([&device] {
+        std::vector<std::unique_ptr<Device>> vector;
+        vector.push_back(std::move(device));
+        return vector;
+      }()) {}
+
 DynamicDeviceMgr::~DynamicDeviceMgr() {
   // Release resources ahead of destroying the device manager as the resource
   // destructors (e.g. ~IteratorResource) assume devices still exist.

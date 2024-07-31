@@ -206,7 +206,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
       shared_pool_bytes_.emplace(tf_device_id.value(), 0);
     }
 
-    auto gpu_bfc_allocator = absl::make_unique<GPUBFCAllocator>(
+    GPUBFCAllocator* gpu_bfc_allocator = new GPUBFCAllocator(
         sub_allocator, total_bytes,
         strings::StrCat("GPU_", tf_device_id.value(), "_", stream_id, "_bfc"),
         [&] {
@@ -221,7 +221,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
           o.shared_pool_bytes = &shared_pool_bytes_[tf_device_id.value()];
           return o;
         }());
-    Allocator* gpu_allocator = gpu_bfc_allocator.get();
+    Allocator* gpu_allocator = gpu_bfc_allocator;
 
     SharedCounter* timing_counter = nullptr;
     if (options.experimental().timestamped_allocator()) {
@@ -241,7 +241,8 @@ Allocator* GPUProcessState::GetGPUAllocator(
       // If true, passes all allocation requests through to cudaMalloc
       // useful for doing memory debugging with tools like cuda-memcheck
       // **WARNING** probably will not work in a multi-gpu scenario
-      gpu_bfc_allocator.reset();
+      delete gpu_bfc_allocator;
+      gpu_bfc_allocator = nullptr;
       gpu_allocator = new GPUcudaMallocAllocator(platform_device_id, stream_id);
     } else if (UseCudaMallocAsyncAllocator() ||
                options.experimental().use_cuda_malloc_async()) {
@@ -251,7 +252,8 @@ Allocator* GPUProcessState::GetGPUAllocator(
       // TODO: useful for doing memory debugging with tools like
       // compute-sanitizer.
       // TODO: **WARNING** probably will not work in a multi-gpu scenario
-      gpu_bfc_allocator.reset();
+      delete gpu_bfc_allocator;
+      gpu_bfc_allocator = nullptr;
       gpu_allocator =
           new GpuCudaMallocAsyncAllocator(platform_device_id, total_bytes,
                                           false, true, stream_id);
@@ -269,7 +271,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
     }
     allocator_parts = {std::unique_ptr<Allocator>(gpu_allocator),
                        std::unique_ptr<SharedCounter>(timing_counter),
-                       gpu_bfc_allocator.get(), sub_allocator,
+                       gpu_bfc_allocator, sub_allocator,
                        std::unique_ptr<Allocator>(recording_allocator)};
   }
   if (process_state_->ProcessState::FLAGS_brain_gpu_record_mem_types) {
@@ -395,22 +397,24 @@ Allocator* GPUProcessState::GetGpuHostAllocator(int numa_node,
   CHECK_NE(nullptr, se);
 
   while (static_cast<int>(gpu_host_allocators_.size()) <= numa_node) {
-    while (gpu_host_alloc_visitors_.size() <= numa_node) {
-      gpu_host_alloc_visitors_.push_back({});
+    gpu_host_allocators_.push_back({});
+  }
+  while (gpu_host_alloc_visitors_.size() <= numa_node) {
+    gpu_host_alloc_visitors_.push_back({});
+  }
+  for (int n = 0; n <= numa_node; ++n) {
+    while (gpu_host_alloc_visitors_[n].size() <= stream_id) {
+      gpu_host_alloc_visitors_[n].push_back({});
     }
-    for (int n = 0; n <= numa_node; ++n) {
-      while (gpu_host_alloc_visitors_[n].size() <= stream_id) {
-        gpu_host_alloc_visitors_[n].push_back({});
-      }
+  }
+  while (gpu_host_free_visitors_.size() <= numa_node) {
+    gpu_host_free_visitors_.push_back({});
+  }
+  for (int n = 0; n <= numa_node; ++n) {
+    while (gpu_host_free_visitors_[n].size() <= stream_id) {
+      gpu_host_free_visitors_[n].push_back({});
     }
-    while (gpu_host_free_visitors_.size() <= numa_node) {
-      gpu_host_free_visitors_.push_back({});
-    }
-    for (int n = 0; n <= numa_node; ++n) {
-      while (gpu_host_free_visitors_[n].size() <= stream_id) {
-        gpu_host_free_visitors_[n].push_back({});
-      }
-    }
+  }
   // Create one allocator for every numa node at the given stream.
   for (int numa_idx = 0; numa_idx <= numa_node; ++numa_idx) {
     if (static_cast<int>(gpu_host_allocators_[numa_idx].size()) > stream_id &&
@@ -469,7 +473,6 @@ Allocator* GPUProcessState::GetGpuHostAllocator(int numa_node,
     return gpu_host_allocators_[0][stream_id].recording_allocator.get();
   } else {
     return gpu_host_allocators_[0][stream_id].allocator.get();
-  }
   }
 }
 
