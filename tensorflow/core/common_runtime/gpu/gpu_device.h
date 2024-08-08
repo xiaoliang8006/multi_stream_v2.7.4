@@ -64,6 +64,15 @@ class BaseGPUDevice : public LocalDevice {
   // Initialize the device and return the status of initialization.
   Status Init(const SessionOptions& options);
 
+  Status FillContextID(const Graph* graph,
+                       DeviceContextID* device_context_id) override;
+
+  Status FillMultiStreamResources(
+      const Graph* graph, DeviceContextID* device_context_id,
+      std::vector<std::pair<std::string, int>>& stream_wait_list,
+      std::unordered_map<std::string, std::set<std::pair<int, std::string>>>&
+          need_sync_node_deps) override;
+
   void Compute(OpKernel* op_kernel, OpKernelContext* context) override;
 
   Status Sync() override;
@@ -126,6 +135,12 @@ class BaseGPUDevice : public LocalDevice {
     return stream_->compute->implementation()->GpuStreamMemberHack();
   }
 
+  Status TryGetDeviceContext(DeviceContext** out_context) override {
+    *out_context = device_context_;
+    device_context_->Ref();
+    return Status::OK();
+  }
+
  protected:
   Allocator* gpu_allocator_;  // not owned
   Allocator* cpu_allocator_;  // not owned
@@ -183,6 +198,10 @@ class BaseGPUDevice : public LocalDevice {
   Tensor CopyGpuTensorToHostDebugOnly(const Tensor& gpu_tensor);
   void LogInputs(OpKernel* op_kernel, OpKernelContext* context);
   void LogOutputs(OpKernel* op_kernel, OpKernelContext* context);
+
+  void WaitOnStream(OpKernel* op_kernel, OpKernelContext* context,
+                    se::Stream* stream, const int stream_id,
+                    const bool vlog_1 = false);
 };
 
 // A per-compute-stream utility that keeps track of kernels that have been

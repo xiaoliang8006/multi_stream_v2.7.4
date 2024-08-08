@@ -115,6 +115,7 @@ filegroup(
         "gpu_init.h",
         "gpu_managed_allocator.h",
         "gpu_process_state.h",
+        "gpu_stream_util.h",
         "gpu_util.h",
         "gpu_virtual_mem_allocator.h",
         "//tensorflow/core/common_runtime:gpu_runtime_headers",
@@ -133,6 +134,7 @@ tf_cuda_library(
         "gpu_device_factory.cc",
         "gpu_managed_allocator.cc",
         "gpu_process_state.cc",
+        "gpu_stream_util.cc",
         "gpu_util.cc",
         "gpu_util_platform_specific.cc",
     ],
@@ -441,6 +443,31 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
         "//tensorflow/stream_executor:platform",
+    ],
+)
+
+tf_cc_test(
+    name = "gpu_stream_util_test",
+    size = "small",
+    srcs = ["gpu_stream_util_test.cc"],
+    tags = tf_cuda_tests_tags() + ["nomac"],
+    deps = [
+        ":gpu_runtime",
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:sendrecv_ops",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_internal",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
+        "//tensorflow/core/common_runtime:core_cpu",
+        "//tensorflow/core/common_runtime:core_cpu_internal",
+        "//tensorflow/core/common_runtime:direct_session_internal",
+        "//tensorflow/core/kernels:matmul_op",
+        "//tensorflow/core/kernels:ops_util",
     ],
 )
 

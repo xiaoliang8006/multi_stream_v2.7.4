@@ -85,6 +85,14 @@ namespace tensorflow {
 
 namespace {
 
+static const bool node_level_multistream = [] {
+  bool node_level_multistream;
+  TF_CHECK_OK(ReadBoolFromEnvVar("TF_NODE_LEVEL_MULTISTREAM",
+                                 /*default_val=*/false,
+                                 &node_level_multistream));
+  return node_level_multistream;
+}();
+
 auto* direct_session_runs = monitoring::Counter<0>::New(
     "/tensorflow/core/direct_session_runs",
     "The number of times DirectSession::Run() has been called.");
@@ -324,15 +332,27 @@ DirectSession::DirectSession(const SessionOptions& options,
                             ? std::make_unique<StreamGroupMgr>(
                                   device_mgr->StreamGroupCount())
                             : nullptr) {
-  const int thread_pool_size =
-      options_.config.session_inter_op_thread_pool_size();
+  int thread_pool_size = options_.config.session_inter_op_thread_pool_size();
+  if (node_level_multistream) {
+    // The number of thread pool must match the number of stream group
+    int64_t gpu_stream_group_count;
+    TF_CHECK_OK(tensorflow::ReadInt64FromEnvVar("TF_GPU_STREAM_GROUP_COUNT",
+                                                /*default_val=*/1,
+                                                &gpu_stream_group_count));
+    thread_pool_size = gpu_stream_group_count;
+  }
   if (thread_pool_size > 0) {
     for (int i = 0; i < thread_pool_size; ++i) {
       thread::ThreadPool* pool = nullptr;
       bool owned = false;
-      init_error_.Update(NewThreadPoolFromThreadPoolOptions(
-          options_, options_.config.session_inter_op_thread_pool(i), i, &pool,
-          &owned));
+      if (node_level_multistream) {
+        init_error_.Update(NewThreadPoolFromThreadPoolOptions(
+            options_, ThreadPoolOptionProto(), i, &pool, &owned));
+      } else {
+        init_error_.Update(NewThreadPoolFromThreadPoolOptions(
+            options_, options_.config.session_inter_op_thread_pool(i), i, &pool,
+            &owned));
+      }
       thread_pools_.emplace_back(pool, owned);
     }
   } else if (options_.config.use_per_session_threads()) {
@@ -593,7 +613,7 @@ Status DirectSession::RunInternal(
     threadpool_wrapper = absl::make_unique<thread::ThreadPool>(
         threadpool_options.inter_op_threadpool);
     pool = threadpool_wrapper.get();
-  } else if (stream_group_idx >= 0) {
+  } else if (!node_level_multistream && stream_group_idx >= 0) {
     pool = thread_pools_[stream_group_idx % thread_pools_.size()].first;
   } else {
     if (run_options.inter_op_thread_pool() < -1 ||
@@ -708,8 +728,8 @@ Status DirectSession::RunInternal(
   Status run_status;
 
   auto set_threadpool_args_for_item =
-      [&default_runner, &handler](const PerPartitionExecutorsAndLib& item,
-                                  Executor::Args* args) {
+      [this, &default_runner, &handler](const PerPartitionExecutorsAndLib& item,
+                                        Executor::Args* args) {
         // TODO(azaks): support partial run.
         // TODO(azaks): if the device picks its own threadpool, we need to
         // assign
@@ -728,6 +748,24 @@ Status DirectSession::RunInternal(
         if (handler != nullptr) {
           args->user_intra_op_threadpool =
               handler->AsIntraThreadPoolInterface();
+        }
+        if (node_level_multistream) {
+          for (int j = 0; j < thread_pools_.size(); ++j) {
+            auto pool = thread_pools_[j].first;
+            if (!device_thread_pool) {
+              args->nlp_runners.push_back([pool](Executor::Args::Closure c) {
+                pool->Schedule(std::move(c));
+              });
+            } else {
+              thread::ThreadPool* stream_thread_pool =
+                  device_mgr_->LookupStream(item.device, j)
+                      ->tensorflow_device_thread_pool();
+              args->nlp_runners.push_back(
+                  [stream_thread_pool](Executor::Args::Closure c) {
+                    stream_thread_pool->Schedule(std::move(c));
+                  });
+            }
+          }
         }
       };
 
@@ -757,7 +795,7 @@ Status DirectSession::RunInternal(
 
     for (int i = 0; i < executors_and_keys->items.size(); ++i) {
       const auto& item =
-          stream_group_idx == -1 ||
+          stream_group_idx == -1 || node_level_multistream ||
                   executors_and_keys->stream_items[i].size() <= stream_group_idx
               ? executors_and_keys->items[i]
               : executors_and_keys->stream_items[i][stream_group_idx];
@@ -1361,7 +1399,10 @@ Status DirectSession::CreateExecutors(
     }
   }
   ek->items.reserve(graphs.size());
-  ek->stream_items.reserve(graphs.size());
+  int stream_group_count = device_mgr_->StreamGroupCount();
+  if (stream_group_count > 0 && !node_level_multistream) {
+    ek->stream_items.reserve(graphs.size());
+  }
   const auto& optimizer_opts =
       options_.config.graph_options().optimizer_options();
 
@@ -1381,21 +1422,22 @@ Status DirectSession::CreateExecutors(
             return Status::OK();
           }}));
 
-  int stream_group_count = device_mgr_->StreamGroupCount();
-  func_info->stream_proc_flr.reserve(stream_group_count);
-  for (int executor_index = 0; executor_index < stream_group_count;
-       ++executor_index) {
-    func_info->stream_proc_flr.push_back(
-        std::make_unique<ProcessFunctionLibraryRuntime>(
-            device_mgr_.get(), options_.env, &options_.config,
-            graph_def_version, func_info->flib_def.get(), optimizer_opts,
-            thread_pools_[executor_index % thread_pools_.size()].first,
-            /*parent=*/nullptr, session_metadata,
-      Rendezvous::Factory{
-          [](const int64_t, const DeviceMgr* device_mgr, Rendezvous** r) {
-            *r = new IntraProcessRendezvous(device_mgr);
-            return Status::OK();
-            }}));
+  if (stream_group_count > 0 && !node_level_multistream) {
+    func_info->stream_proc_flr.reserve(stream_group_count);
+    for (int executor_index = 0; executor_index < stream_group_count;
+        ++executor_index) {
+      func_info->stream_proc_flr.push_back(
+          std::make_unique<ProcessFunctionLibraryRuntime>(
+              device_mgr_.get(), options_.env, &options_.config,
+              graph_def_version, func_info->flib_def.get(), optimizer_opts,
+              thread_pools_[executor_index % thread_pools_.size()].first,
+              /*parent=*/nullptr, session_metadata,
+        Rendezvous::Factory{
+            [](const int64_t, const DeviceMgr* device_mgr, Rendezvous** r) {
+              *r = new IntraProcessRendezvous(device_mgr);
+              return Status::OK();
+              }}));
+    }
   }
 
   GraphOptimizer optimizer(optimizer_opts);
@@ -1463,74 +1505,76 @@ Status DirectSession::CreateExecutors(
     auto executor_type = options_.config.experimental().executor_type();
 
     // Create the multi-stream executors first.
-    ek->stream_items.resize(ek->stream_items.size() + 1);
-    auto* items = &(ek->stream_items.back());
-    items->reserve(stream_group_count);
+    if (stream_group_count > 0 && !node_level_multistream) {
+      ek->stream_items.resize(ek->stream_items.size() + 1);
+      auto* items = &(ek->stream_items.back());
+      items->reserve(stream_group_count);
 
-    std::vector<FunctionLibraryRuntime*> stream_libs;
-    for (size_t executor_index = 0; executor_index < stream_group_count;
-         ++executor_index) {
-      stream_libs.push_back(
-          func_info->stream_proc_flr[executor_index]->GetFLR(partition_name));
-    }
-    for (int executor_index = 0; executor_index < stream_group_count;
-         ++executor_index) {
-      items->resize(items->size() + 1);
-      auto* item = &(items->back());
-
-      auto lib = stream_libs[executor_index];
-      if (lib == nullptr) {
-        return errors::Internal("Could not find device: ", partition_name);
+      std::vector<FunctionLibraryRuntime*> stream_libs;
+      for (size_t executor_index = 0; executor_index < stream_group_count;
+           ++executor_index) {
+        stream_libs.push_back(
+            func_info->stream_proc_flr[executor_index]->GetFLR(partition_name));
       }
-      item->flib = lib;
+      for (int executor_index = 0; executor_index < stream_group_count;
+           ++executor_index) {
+        items->resize(items->size() + 1);
+        auto* item = &(items->back());
 
-      static size_t const_stream_idx = 0;
-      LocalExecutorParams params;
-      params.device = device_mgr_->LookupStream(device, executor_index);
-      params.session_metadata = session_metadata;
-      params.function_library = lib;
-      params.create_kernel =
-          [this, lib, opseg, stream_group_count, &stream_libs](
-              const std::shared_ptr<const NodeProperties>& props,
-              OpKernel** kernel) {
-            // NOTE(mrry): We must not share function kernels (implemented
-            // using `CallOp`) between subgraphs, because `CallOp::handle_`
-            // is tied to a particular subgraph. Even if the function itself
-            // is stateful, the `CallOp` that invokes it is not.
-            if (!OpSegment::ShouldOwnKernel(lib, props->node_def.op())) {
-              return lib->CreateKernel(props, kernel);
-            }
-            auto create_fn = [lib, &props, stream_group_count,
-                              &stream_libs](OpKernel** kernel) {
-              if (props->node_def.op() == "Const") {
-                const_stream_idx = (++const_stream_idx) % stream_group_count;
-                return stream_libs[const_stream_idx]->CreateKernel(props,
-                                                                   kernel);
-              } else {
+        auto lib = stream_libs[executor_index];
+        if (lib == nullptr) {
+          return errors::Internal("Could not find device: ", partition_name);
+        }
+        item->flib = lib;
+
+        static size_t const_stream_idx = 0;
+        LocalExecutorParams params;
+        params.device = device_mgr_->LookupStream(device, executor_index);
+        params.session_metadata = session_metadata;
+        params.function_library = lib;
+        params.create_kernel =
+            [this, lib, opseg, stream_group_count, &stream_libs](
+                const std::shared_ptr<const NodeProperties>& props,
+                OpKernel** kernel) {
+              // NOTE(mrry): We must not share function kernels (implemented
+              // using `CallOp`) between subgraphs, because `CallOp::handle_`
+              // is tied to a particular subgraph. Even if the function itself
+              // is stateful, the `CallOp` that invokes it is not.
+              if (!OpSegment::ShouldOwnKernel(lib, props->node_def.op())) {
                 return lib->CreateKernel(props, kernel);
               }
+              auto create_fn = [lib, &props, stream_group_count,
+                                &stream_libs](OpKernel** kernel) {
+                if (props->node_def.op() == "Const") {
+                  const_stream_idx = (++const_stream_idx) % stream_group_count;
+                  return stream_libs[const_stream_idx]->CreateKernel(props,
+                                                                     kernel);
+                } else {
+                  return lib->CreateKernel(props, kernel);
+                }
+              };
+              // Kernels created for subgraph nodes need to be cached.  On
+              // cache miss, create_fn() is invoked to create a kernel based
+              // on the function library here + global op registry.
+              return opseg->FindOrCreate(
+                  session_handle_, props->node_def.name(), kernel, create_fn);
             };
-            // Kernels created for subgraph nodes need to be cached.  On
-            // cache miss, create_fn() is invoked to create a kernel based
-            // on the function library here + global op registry.
-            return opseg->FindOrCreate(session_handle_, props->node_def.name(),
-                                       kernel, create_fn);
-          };
-      params.delete_kernel = [lib](OpKernel* kernel) {
-        if (kernel && !OpSegment::ShouldOwnKernel(lib, kernel->type_string()))
-          delete kernel;
-      };
+        params.delete_kernel = [lib](OpKernel* kernel) {
+          if (kernel && !OpSegment::ShouldOwnKernel(lib, kernel->type_string()))
+            delete kernel;
+        };
 
-      // NewLocalExecutor takes ownership of dup_graph.
-      std::unique_ptr<Graph> dup_graph(new Graph(func_info->flib_def.get()));
-      CopyGraph(*partition_graph, dup_graph.get());
-      item->executor = nullptr;
-      item->device = params.device;
-      TF_RETURN_IF_ERROR(
-          NewExecutor(executor_type, params, *dup_graph, &item->executor));
-      if (!options_.config.experimental().disable_output_partition_graphs() ||
-          options_.config.graph_options().build_cost_model() > 0) {
-        item->graph = std::move(dup_graph);
+        // NewLocalExecutor takes ownership of dup_graph.
+        std::unique_ptr<Graph> dup_graph(new Graph(func_info->flib_def.get()));
+        CopyGraph(*partition_graph, dup_graph.get());
+        item->executor = nullptr;
+        item->device = params.device;
+        TF_RETURN_IF_ERROR(
+            NewExecutor(executor_type, params, *dup_graph, &item->executor));
+        if (!options_.config.experimental().disable_output_partition_graphs() ||
+            options_.config.graph_options().build_cost_model() > 0) {
+          item->graph = std::move(dup_graph);
+        }
       }
     }
 

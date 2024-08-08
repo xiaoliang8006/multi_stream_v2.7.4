@@ -21,9 +21,11 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/graph_view.h"
 #include "tensorflow/core/common_runtime/local_executor_params.h"
 #include "tensorflow/core/common_runtime/pending_counts.h"
+#include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/flatmap.h"
@@ -75,10 +77,17 @@ class ImmutableExecutorState {
   };
 
   explicit ImmutableExecutorState(const LocalExecutorParams& p)
-      : params_(p), gview_() {}
+      : params_(p),
+        gview_(),
+        device_mgr_(p.function_library == nullptr
+                        ? nullptr
+                        : p.function_library->device_mgr()) {}
   ~ImmutableExecutorState();
 
   Status Initialize(const Graph& graph);
+  void FillContextMap();
+  void FillMultiStreamResources();
+  void FillNodeTypeMap();
 
   // Process all Nodes in the current graph, attempting to infer the
   // memory allocation attributes to be used wherever they may allocate
@@ -87,6 +96,7 @@ class ImmutableExecutorState {
 
   const LocalExecutorParams& params() const { return params_; }
   const GraphView& graph_view() const { return gview_; }
+  const Graph* graph() const { return graph_; }
   const std::vector<PendingCounts::Handle>& pending_ids() const {
     return pending_ids_;
   }
@@ -116,6 +126,26 @@ class ImmutableExecutorState {
     std::atomic_thread_fence(std::memory_order_release);
   }
 
+  const DeviceContextMap* device_context_map() const {
+    return &device_context_map_;
+  }
+  const DeviceContextID* device_context_id() const {
+    return &device_context_id_;
+  }
+  const std::vector<std::pair<std::string, int>>* stream_wait_list() const {
+    return &stream_wait_list_;
+  }
+
+  const std::unordered_map<std::string, std::set<std::pair<int, std::string>>>*
+  need_sync_node_deps() const {
+    return &need_sync_node_deps_;
+  }
+
+  const std::unordered_map<std::string, std::string>* node_type_map() const {
+    return &node_type_map_;
+  }
+  const DeviceMgr* device_mgr() const { return device_mgr_; }
+
  private:
   struct ControlFlowInfo {
     gtl::FlatSet<string> unique_frame_names;
@@ -131,8 +161,20 @@ class ImmutableExecutorState {
   // Owned.
   LocalExecutorParams params_;
   GraphView gview_;
+  const Graph* graph_;
   bool requires_control_flow_;
   std::vector<PendingCounts::Handle> pending_ids_;
+
+  // Contains a value for [node->id()] for the device context assigned by the
+  // device at the beginning of a step.
+  DeviceContextMap device_context_map_;
+  DeviceContextID device_context_id_;
+  std::vector<std::pair<std::string, int>> stream_wait_list_;
+  std::unordered_map<std::string, std::string> node_type_map_;
+  std::unordered_map<std::string, std::set<std::pair<int, std::string>>>
+      need_sync_node_deps_;
+
+  const DeviceMgr* device_mgr_;
 
   // Root nodes (with no in edges) that should form the initial ready queue
   std::vector<const NodeItem*> root_nodes_;

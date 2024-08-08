@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/gtl/manual_constructor.h"
 
@@ -38,7 +39,10 @@ struct Entry {
   };
 
   Entry() : state(State::NO_VALUE) {}
-  Entry(const Entry& other) : state(other.state), alloc_attr(other.alloc_attr) {
+  Entry(const Entry& other)
+      : state(other.state),
+        alloc_attr(other.alloc_attr),
+        device_context(other.device_context) {
     switch (state) {
       case State::NO_VALUE:
         break;
@@ -64,6 +68,7 @@ struct Entry {
     }
     state = other.state;
     alloc_attr = other.alloc_attr;
+    device_context = other.device_context;
     switch (state) {
       case State::NO_VALUE:
         break;
@@ -86,6 +91,7 @@ struct Entry {
     }
     state = other.state;
     alloc_attr = other.alloc_attr;
+    device_context = other.device_context;
     switch (state) {
       case State::NO_VALUE:
         break;
@@ -132,6 +138,10 @@ struct Entry {
 
   // The attributes of the allocator that creates the tensor.
   AllocatorAttributes alloc_attr;
+
+  // Every entry carries an optional DeviceContext containing
+  // Device-specific information about how the Tensor was produced.
+  DeviceContext* device_context = nullptr;
 };
 
 // TODO(b/152925936): Re-evaluate this constant with current usage patterns.

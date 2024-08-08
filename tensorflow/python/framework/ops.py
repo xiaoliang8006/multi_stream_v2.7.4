@@ -87,7 +87,9 @@ from tensorflow.python.util.tf_export import tf_export
 ag_ctx = LazyLoader(
     "ag_ctx", globals(),
     "tensorflow.python.autograph.core.ag_ctx")
-
+multi_stream = LazyLoader(
+    "multi_stream", globals(),
+    "tensorflow.python.cuda.multi_stream")
 
 # Temporary global switches determining if we should enable the work-in-progress
 # calls to the C API. These will be removed once all functionality is supported.
@@ -2785,7 +2787,17 @@ def get_gradient_function(op):
     op_type = op.get_attr("_gradient_op_type")
   except ValueError:
     op_type = op.type
-  return gradient_registry.lookup(op_type)
+  fn = gradient_registry.lookup(op_type)
+  if multi_stream.multi_stream_is_enabled():
+    _include_grad = op.node_def.attr["_stream_assign_include_grad"].b
+    if _include_grad and callable(fn):
+      _stream_id = op.node_def.attr["_stream_id"].i
+      stream = multi_stream.get_stream(stream_id=_stream_id)
+      def stream_scope_wrapper(*args, **kwargs):
+        with multi_stream.stream_scope(stream=stream, include_grad=False):
+          return fn(*args, **kwargs)
+      return stream_scope_wrapper
+  return fn
 
 
 def set_shape_and_handle_data_for_outputs(_):
@@ -5373,6 +5385,15 @@ class Graph(object):
     """
     return self._group_lock.group(_SESSION_RUN_LOCK_GROUP)
 
+  @property
+  def stream_manager(self):
+    if not hasattr(self._thread_local, "_stream_manager"):
+      self._thread_local._stream_manager = multi_stream.GraphStreamManager()
+    return self._thread_local._stream_manager
+
+  @stream_manager.setter
+  def stream_manager(self, stream_manager):
+    self._thread_local._stream_manager = stream_manager
 
 # TODO(agarwal): currently device directives in an outer eager scope will not
 # apply to inner graph mode code. Fix that.

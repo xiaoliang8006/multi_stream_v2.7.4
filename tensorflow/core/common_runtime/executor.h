@@ -113,6 +113,7 @@ class Executor {
     typedef std::function<void()> Closure;
     typedef std::function<void(Closure)> Runner;
     Runner runner = nullptr;
+    std::vector<Runner> nlp_runners;
 
     // If true, all kernels will be treated as "inexpensive", and hence executed
     // on the scheduling thread.

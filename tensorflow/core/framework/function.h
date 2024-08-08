@@ -819,6 +819,7 @@ class FunctionLibraryRuntime {
     CoordinationServiceAgent* coordination_service_agent = nullptr;
 
     std::function<void(std::function<void()>)>* runner = nullptr;
+    std::vector<std::function<void(std::function<void()>)>> nlp_runners;
 
     // Parameters for remote function execution.
     bool remote_execution = false;

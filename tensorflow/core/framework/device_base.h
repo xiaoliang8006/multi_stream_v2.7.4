@@ -123,6 +123,10 @@ class DeviceContext : public core::RefCounted {
   virtual int stream_id() const { return 0; }
 };
 
+// map[i] is the DeviceContext* for the node with id i, if i < map.size().
+typedef std::vector<DeviceContext*> DeviceContextMap;
+typedef std::vector<int32> DeviceContextID;
+
 class DeviceBase {
  public:
   explicit DeviceBase(Env* env) : env_(env) {}

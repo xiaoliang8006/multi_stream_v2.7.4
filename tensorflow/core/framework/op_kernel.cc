@@ -124,6 +124,16 @@ OpKernel::OpKernel(OpKernelConstruction* context, bool is_deferred)
   expensive_ = context->device_type() != DeviceType(DEVICE_GPU) &&
                !DeviceFactory::IsPluggableDevice(
                    DeviceTypeString(context->device_type()));
+
+  for (int i = 0; i < props_->node_def.input_size(); ++i) {
+    const std::string& input_name = props_->node_def.input(i);
+    size_t dash_pos = input_name.rfind(":");
+    if (dash_pos != string::npos) {
+      input_node_name_.push_back(input_name.substr(0, dash_pos));
+    } else {
+      input_node_name_.push_back(input_name);
+    }
+  }
 }
 
 OpKernel::OpKernel(OpKernelConstruction* context, NodeDef&& custom_def,

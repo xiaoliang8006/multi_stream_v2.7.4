@@ -163,6 +163,9 @@ class OpKernel {
   const std::string& requested_input(int i) const {
     return props_->node_def.input(i);
   }
+  const std::string& requested_input_name(int i) const {
+    return input_node_name_[i];
+  }
   const std::string& requested_device() const {
     return props_->node_def.device();
   }
@@ -207,6 +210,7 @@ class OpKernel {
   const int graph_def_version_;
   const bool is_deferred_;
   bool expensive_;
+  std::vector<std::string> input_node_name_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(OpKernel);
 };
@@ -647,6 +651,9 @@ class OpKernelContext {
     const gtl::InlinedVector<AllocatorAttributes, 4>* input_alloc_attrs =
         nullptr;
 
+    const gtl::InlinedVector<DeviceContext*, 4>* input_device_contexts =
+        nullptr;
+
     // Device context.
     DeviceContext* op_device_context = nullptr;
 
@@ -684,8 +691,23 @@ class OpKernelContext {
     // For access to distributed coordination service.
     CoordinationServiceAgent* coordination_service_agent = nullptr;
 
+    // device manager
+    const DeviceMgr* device_mgr = nullptr;
+
     // To hold some CPU tensors until the session run finish.
     TensorHolder* tensor_holder = nullptr;
+
+    // A map from the node names to their types.
+    const std::unordered_map<std::string, std::string>* node_type_map = nullptr;
+
+    // For reducing unnecessary stream wait in multi-stream training.
+    std::map<std::pair<std::string, int>, std::atomic<bool>>*
+        stream_wait_flags = nullptr;
+
+    // For ensure dependency between ops in tensorflow multi-stream
+    const std::unordered_map<std::string,
+                             std::set<std::pair<int, std::string>>>*
+        need_sync_node_deps = nullptr;
   };
 
   // params must outlive the OpKernelContext.
@@ -1021,6 +1043,18 @@ class OpKernelContext {
   // Returns nullptr if allocate_output() or set_output() have not been called.
   Status mutable_output(StringPiece name, Tensor** tensor);
 
+  // Records device specific state about how the input tensors were
+  // computed.
+  //
+  // If using the templated function, the type must be a subclass
+  // of DeviceContext.
+  //
+  // Get the DeviceContext used for the index input.  Returns nullptr
+  // if no DeviceContext was provided.
+  template <typename T>
+  T* input_device_context(int index);
+  DeviceContext* input_device_context(int index);
+
   // Return the DeviceContext that should be used for this Op.
   //
   // If using the templated function, the type must be a subclass
@@ -1166,8 +1200,30 @@ class OpKernelContext {
     return params_->coordination_service_agent;
   }
 
+  const DeviceMgr* device_mgr() const { return params_->device_mgr; }
+
   // Obtain the tensor holder.
   TensorHolder* tensor_holder() const { return params_->tensor_holder; }
+
+  std::string node_type(std::string node_name) {
+    auto find_result = params_->node_type_map->find(node_name);
+    if (find_result == params_->node_type_map->end()) {
+      VLOG(2) << "No node in node_type_map: " << node_name;
+      return "MustSyncOp";
+    } else {
+      return find_result->second;
+    }
+  }
+
+  std::map<std::pair<std::string, int>, std::atomic<bool>>* stream_wait_flags()
+      const {
+    return params_->stream_wait_flags;
+  }
+
+  const std::unordered_map<std::string, std::set<std::pair<int, std::string>>>*
+  need_sync_node_deps() const {
+    return params_->need_sync_node_deps;
+  }
 
   // Helper routines for the OP_REQUIRES macros
   void CtxFailure(const Status& s);
@@ -1641,6 +1697,23 @@ T* OpKernelContext::op_device_context() {
   static_assert(std::is_base_of<DeviceContext, T>::value,
                 "T is not a subclass of DeviceContext");
   return static_cast<T*>(op_device_context());
+}
+
+template <typename T>
+T* OpKernelContext::input_device_context(int index) {
+  if (params_->input_device_contexts == nullptr) return nullptr;
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, params_->input_device_contexts->size());
+  static_assert(std::is_base_of<DeviceContext, T>::value,
+                "T is not a subclass of DeviceContext");
+  return static_cast<T*>((*params_->input_device_contexts)[index]);
+}
+
+inline DeviceContext* OpKernelContext::input_device_context(int index) {
+  if (params_->input_device_contexts == nullptr) return nullptr;
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, params_->input_device_contexts->size());
+  return (*params_->input_device_contexts)[index];
 }
 
 inline const Tensor& OpInputList::operator[](int i) const {
