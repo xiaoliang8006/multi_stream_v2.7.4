@@ -40,6 +40,11 @@ ImmutableExecutorState::~ImmutableExecutorState() {
       params_.delete_kernel(item->kernel);
     }
   }
+  for (auto ctx : device_context_map_) {
+    if (ctx != nullptr) {
+      ctx->Unref();
+    }
+  }
 }
 
 namespace {
@@ -82,6 +87,7 @@ ImmutableExecutorState::FrameInfo* ImmutableExecutorState::EnsureFrameInfo(
 }
 
 Status ImmutableExecutorState::Initialize(const Graph& graph) {
+  graph_ = &graph;
   TF_RETURN_IF_ERROR(gview_.Initialize(&graph));
 
   // Build the information about frames in this subgraph.
@@ -260,6 +266,52 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
   // for all nodes.
   InitializePending(&graph, cf_info);
   return gview_.SetAllocAttrs(&graph, params_.device);
+}
+
+void ImmutableExecutorState::FillContextMap() {
+  // Ask the device to fill in the device context map.
+  Device* device = params_.device;
+  if (device->parsed_name().type != "GPU") {
+    return;
+  }
+  const Status fill_status = device->FillContextID(graph_, &device_context_id_);
+  if (!fill_status.ok()) {
+    LOG(FATAL) << "Failed to fill the context id";
+    return;
+  }
+  if (device_mgr_ != nullptr) {
+    DeviceContext* ctx;
+    Status s;
+    for (auto it : device_context_id_) {
+      s = device_mgr_->LookupStream(device, it)->TryGetDeviceContext(&ctx);
+      device_context_map_.push_back(s.ok() ? ctx : nullptr);
+    }
+  }
+}
+
+void ImmutableExecutorState::FillMultiStreamResources() {
+  // Ask the device to fill in the device context map.
+  Device* device = params_.device;
+  if (device->parsed_name().type != "GPU") {
+    return;
+  }
+  const Status fill_status = device->FillMultiStreamResources(
+      graph_, &device_context_id_, stream_wait_list_, need_sync_node_deps_);
+  if (!fill_status.ok()) {
+    LOG(FATAL) << "Failed to fill the stream wait list";
+    return;
+  }
+}
+
+void ImmutableExecutorState::FillNodeTypeMap() {
+  if (params_.device->parsed_name().type != "GPU") {
+    return;
+  }
+  for (Node* node : graph_->nodes()) {
+    std::string node_name = node->name();
+    std::string node_type = node->type_string();
+    node_type_map_[node_name] = node_type;
+  }
 }
 
 namespace {

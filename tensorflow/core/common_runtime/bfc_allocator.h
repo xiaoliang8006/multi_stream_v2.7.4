@@ -73,7 +73,7 @@ class BFCAllocator : public Allocator {
     int64_t* shared_pool_bytes = nullptr;
   };
   // Takes ownership of sub_allocator.
-  BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
+  BFCAllocator(std::unique_ptr<SubAllocator> sub_allocator, size_t total_memory,
                bool allow_growth, const string& name,
                const Options& opts);
   ~BFCAllocator() override;

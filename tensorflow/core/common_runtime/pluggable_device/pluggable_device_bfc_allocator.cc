@@ -83,7 +83,7 @@ PluggableDeviceBFCAllocator::PluggableDeviceBFCAllocator(
     DeviceMemAllocator* sub_allocator, size_t total_memory,
     const GPUOptions& gpu_options, const string& name)
     : BFCAllocator(
-          sub_allocator, total_memory,
+          absl::WrapUnique(sub_allocator), total_memory,
           PluggableDeviceBFCAllocator::GetAllowGrowthValue(gpu_options), name, [&] {
             BFCAllocator::Options o;
             o.garbage_collection = PluggableDeviceBFCAllocator::GetGarbageCollectionValue();

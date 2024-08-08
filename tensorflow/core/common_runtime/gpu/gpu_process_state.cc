@@ -103,7 +103,7 @@ int GPUProcessState::BusIdForGPU(TfDeviceId tf_device_id) {
 }
 
 // NOLINTNEXTLINE: clang-tidy complains this is unused because of build flags.
-static SubAllocator* CreateSubAllocator(
+static std::unique_ptr<SubAllocator> CreateSubAllocator(
     const GPUOptions& options, PlatformDeviceId platform_device_id,
     const std::vector<SubAllocator::Visitor>& alloc_visitors,
     size_t total_bytes, const std::vector<TfDeviceId>& peer_gpu_ids,
@@ -149,11 +149,11 @@ static SubAllocator* CreateSubAllocator(
         .release();
   }
 #else
-  return new DeviceMemAllocator(
+  return absl::WrapUnique(new DeviceMemAllocator(
       executor, platform_device_id,
       (options.per_process_gpu_memory_fraction() > 1.0 ||
        options.experimental().use_unified_memory()),
-      alloc_visitors, {});
+      alloc_visitors, {}));
 #endif
 }
 
@@ -196,9 +196,10 @@ Allocator* GPUProcessState::GetGPUAllocator(
     while (stream_id >= gpu_visitors_[bus_id].size()) {
       gpu_visitors_[bus_id].push_back({});
     }
-    auto* sub_allocator = CreateSubAllocator(
+    std::unique_ptr<SubAllocator> sub_allocator = CreateSubAllocator(
         options, platform_device_id, gpu_visitors_[bus_id][stream_id],
         total_bytes, peer_gpu_ids, stream_id);
+    SubAllocator* sub_allocator_ptr = sub_allocator.get();
 
     if (share_memory_pool && shared_pool_bytes_.find(tf_device_id.value()) ==
                                  shared_pool_bytes_.end()) {
@@ -206,8 +207,8 @@ Allocator* GPUProcessState::GetGPUAllocator(
       shared_pool_bytes_.emplace(tf_device_id.value(), 0);
     }
 
-    GPUBFCAllocator* gpu_bfc_allocator = new GPUBFCAllocator(
-        sub_allocator, total_bytes,
+    auto gpu_bfc_allocator = absl::make_unique<GPUBFCAllocator>(
+        std::move(sub_allocator), total_bytes,
         strings::StrCat("GPU_", tf_device_id.value(), "_", stream_id, "_bfc"),
         [&] {
           GPUBFCAllocator::Options o;
@@ -221,7 +222,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
           o.shared_pool_bytes = &shared_pool_bytes_[tf_device_id.value()];
           return o;
         }());
-    Allocator* gpu_allocator = gpu_bfc_allocator;
+    Allocator* gpu_allocator = gpu_bfc_allocator.get();
 
     SharedCounter* timing_counter = nullptr;
     if (options.experimental().timestamped_allocator()) {
@@ -241,8 +242,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
       // If true, passes all allocation requests through to cudaMalloc
       // useful for doing memory debugging with tools like cuda-memcheck
       // **WARNING** probably will not work in a multi-gpu scenario
-      delete gpu_bfc_allocator;
-      gpu_bfc_allocator = nullptr;
+      gpu_bfc_allocator.reset();
       gpu_allocator = new GPUcudaMallocAllocator(platform_device_id, stream_id);
     } else if (UseCudaMallocAsyncAllocator() ||
                options.experimental().use_cuda_malloc_async()) {
@@ -252,8 +252,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
       // TODO: useful for doing memory debugging with tools like
       // compute-sanitizer.
       // TODO: **WARNING** probably will not work in a multi-gpu scenario
-      delete gpu_bfc_allocator;
-      gpu_bfc_allocator = nullptr;
+      gpu_bfc_allocator.reset();
       gpu_allocator =
           new GpuCudaMallocAsyncAllocator(platform_device_id, total_bytes,
                                           false, true, stream_id);
@@ -271,7 +270,7 @@ Allocator* GPUProcessState::GetGPUAllocator(
     }
     allocator_parts = {std::unique_ptr<Allocator>(gpu_allocator),
                        std::unique_ptr<SharedCounter>(timing_counter),
-                       gpu_bfc_allocator, sub_allocator,
+                       gpu_bfc_allocator.release(), sub_allocator_ptr,
                        std::unique_ptr<Allocator>(recording_allocator)};
   }
   if (process_state_->ProcessState::FLAGS_brain_gpu_record_mem_types) {
@@ -438,7 +437,7 @@ Allocator* GPUProcessState::GetGpuHostAllocator(int numa_node,
     BFCAllocator::Options opts;
     Allocator* allocator = 
         new BFCAllocator(
-          sub_allocator, static_cast<size_t>(gpu_host_mem_limit),
+          absl::WrapUnique(sub_allocator), static_cast<size_t>(gpu_host_mem_limit),
           /*allow_growth=*/true,
           /*name=*/strings::StrCat("gpu_host_", stream_id, "_bfc"),
           opts);

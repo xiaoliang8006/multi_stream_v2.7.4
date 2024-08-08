@@ -72,11 +72,20 @@ limitations under the License.
 #include "tensorflow/core/profiler/lib/scoped_annotation.h"
 #include "tensorflow/core/profiler/lib/traceme_encode.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
+#include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
 
 namespace tensorflow {
 
 namespace {
+
+static const bool node_level_multistream = [] {
+  bool node_level_multistream;
+  TF_CHECK_OK(ReadBoolFromEnvVar("TF_NODE_LEVEL_MULTISTREAM",
+                                 /*default_val=*/false,
+                                 &node_level_multistream));
+  return node_level_multistream;
+}();
 
 // 1-D, 0 element tensor.
 static const Tensor* const kEmptyTensor = new Tensor;
@@ -134,6 +143,7 @@ struct KernelTimer {
 
 // TODO(b/152925936): Re-evaluate these constants with current usage patterns.
 typedef gtl::InlinedVector<TensorValue, 4> TensorValueVec;
+typedef gtl::InlinedVector<DeviceContext*, 4> DeviceContextVec;
 typedef gtl::InlinedVector<AllocatorAttributes, 4> AllocatorAttributeVec;
 
 class ExecutorImpl : public Executor {
@@ -142,6 +152,9 @@ class ExecutorImpl : public Executor {
 
   Status Initialize(const Graph& graph) {
     TF_RETURN_IF_ERROR(immutable_state_.Initialize(graph));
+    immutable_state_.FillContextMap();
+    immutable_state_.FillMultiStreamResources();
+    immutable_state_.FillNodeTypeMap();
     kernel_stats_.Initialize(immutable_state_.graph_view());
     return Status::OK();
   }
@@ -303,6 +316,7 @@ class ExecutorState {
   // Before invoking item->kernel, fills in its "inputs".
   Status PrepareInputs(const NodeItem& item, Entry* first_input,
                        TensorValueVec* inputs,
+                       DeviceContextVec* input_device_contexts,
                        AllocatorAttributeVec* input_alloc_attrs,
                        bool* is_input_dead);
 
@@ -336,9 +350,18 @@ class ExecutorState {
   void Finish();
   void ScheduleFinish();
 
+  bool NodeShouldSpecifyThreadPool(const NodeItem& item) const;
+
   // Contains the device context assigned by the device at the beginning of a
   // step.
   DeviceContext* device_context_ = nullptr;
+
+  // Contains a value for [node->id()] for the device context assigned by the
+  // device at the beginning of a step.
+  const DeviceContextMap* device_context_map_;
+  const DeviceContextID* device_context_id_;
+  const std::unordered_map<std::string, std::string>* node_type_map_;
+  std::map<std::pair<std::string, int>, std::atomic<bool>> stream_wait_flags_;
 
   const bool vlog_;  // true if VLOG_IS_ON(1). Used to check vlog cheaply.
 
@@ -374,6 +397,7 @@ class ExecutorState {
   // If not null, use this device to schedule intra-op operation
   std::unique_ptr<DeviceBase> user_device_;
   Executor::Args::Runner runner_;
+  std::vector<Executor::Args::Runner> nlp_runners_;
   bool sync_on_finish_;
   const bool run_all_kernels_inline_;
   TensorHolder* tensor_holder_;
@@ -393,6 +417,8 @@ class ExecutorState {
 
   mutex mu_;
   Status status_ TF_GUARDED_BY(mu_);
+
+  const DeviceMgr* device_mgr_;
 };
 
 template <class PropagatorStateType>
@@ -422,15 +448,23 @@ ExecutorState<PropagatorStateType>::ExecutorState(
       cancellation_manager_(args.cancellation_manager),
       coordination_service_agent_(args.coordination_service_agent),
       runner_(args.runner),
+      nlp_runners_(args.nlp_runners),
       sync_on_finish_(args.sync_on_finish),
       run_all_kernels_inline_(args.run_all_kernels_inline),
       propagator_(immutable_state, step_id_, vlog_),
       num_outstanding_ops_(0),
-      tensor_holder_(args.tensor_holder) {
+      tensor_holder_(args.tensor_holder),
+      device_context_id_(immutable_state.device_context_id()),
+      device_context_map_(immutable_state.device_context_map()),
+      node_type_map_(immutable_state.node_type_map()),
+      device_mgr_(immutable_state.device_mgr()) {
   if (args.user_intra_op_threadpool != nullptr) {
     Device* device = immutable_state_.params().device;
     user_device_ = RenamedDevice::NewRenamedDevice(
         device->name(), device, false, false, args.user_intra_op_threadpool);
+  }
+  for (auto& item : *(immutable_state.stream_wait_list())) {
+    stream_wait_flags_.emplace(item, false);
   }
 }
 
@@ -695,6 +729,7 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
 
   // Parameters passed to OpKernel::Compute.
   TensorValueVec inputs;
+  DeviceContextVec input_device_contexts;
   AllocatorAttributeVec input_alloc_attrs;
 
   OpKernelContext::Params params;
@@ -748,7 +783,11 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
 
   // Set the device_context for this device, if it exists.
   params.op_device_context = device_context_;
+  params.device_mgr = device_mgr_;
   params.tensor_holder = tensor_holder_;
+  params.node_type_map = node_type_map_;
+  params.stream_wait_flags = &stream_wait_flags_;
+  params.need_sync_node_deps = immutable_state_.need_sync_node_deps();
 
   Status s;
   NodeExecStatsInterface* stats = nullptr;
@@ -760,8 +799,29 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
   while (!inline_ready.empty()) {
     tagged_node = inline_ready.front();
     inline_ready.pop_front();
+    if (device_mgr_ != nullptr && node_level_multistream &&
+        tagged_node.node_item->node_id < device_context_id_->size()) {
+      device = device_mgr_->LookupStream(
+          device, (*device_context_id_)[tagged_node.node_item->node_id]);
+      if (user_device_) {
+        params.device = user_device_.get();
+      } else {
+        params.device = device;
+      }
+      if ((*device_context_id_)[tagged_node.node_item->node_id] <
+          nlp_runners_.size()) {
+        params.runner = &(nlp_runners_[(
+            *device_context_id_)[tagged_node.node_item->node_id]]);
+      }
+    }
+
     const NodeItem& item = tagged_node.get_node_item();
     const int id = item.node_id;
+
+    // Set the device_context for this node id, if it exists.
+    if (id < device_context_map_->size()) {
+      params.op_device_context = (*device_context_map_)[id];
+    }
 
     propagator_.MaybeMarkStarted(tagged_node);
 
@@ -798,8 +858,8 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
     } else {
       // Prepares inputs.
       bool is_input_dead = false;
-      s = PrepareInputs(item, first_input, &inputs, &input_alloc_attrs,
-                        &is_input_dead);
+      s = PrepareInputs(item, first_input, &inputs, &input_device_contexts,
+                        &input_alloc_attrs, &is_input_dead);
       if (!s.ok()) {
         // Clear inputs.
         const int num_inputs = item.num_inputs;
@@ -819,6 +879,7 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
       params.output_attr_array = item.output_attrs();
       params.forward_from_array = item.forward_from();
       params.outputs_required_array = item.outputs_required.get();
+      params.input_device_contexts = &input_device_contexts;
 
       if (item.kernel_is_async) {
         ProcessAsync(item, params, tagged_node, first_input, stats);
@@ -868,8 +929,10 @@ void ExecutorState<PropagatorStateType>::Process(TaggedNode tagged_node,
 template <class PropagatorStateType>
 Status ExecutorState<PropagatorStateType>::PrepareInputs(
     const NodeItem& item, Entry* first_input, TensorValueVec* inputs,
+    DeviceContextVec* input_device_contexts,
     AllocatorAttributeVec* input_alloc_attrs, bool* is_input_dead) {
   inputs->resize(item.num_inputs);
+  input_device_contexts->resize(item.num_inputs);
   input_alloc_attrs->resize(item.num_inputs);
 
   *is_input_dead = false;
@@ -878,6 +941,10 @@ Status ExecutorState<PropagatorStateType>::PrepareInputs(
     const bool expect_ref = TF_PREDICT_FALSE(item.is_any_input_ref_typed) &&
                             IsRefType(item.input_type(i));
     Entry* entry = first_input + i;
+    (*input_device_contexts)[i] = entry->device_context;
+    if (entry->device_context == nullptr) {
+      (*input_device_contexts)[i] = device_context_;
+    }
     (*input_alloc_attrs)[i] = entry->alloc_attr;
 
     // i-th input.
@@ -1015,11 +1082,18 @@ Status ExecutorState<PropagatorStateType>::ProcessOutputs(
     return s;
   }
 
+  DeviceContext* device_context = device_context_;
+  if (item.node_id < device_context_map_->size()) {
+    device_context = (*device_context_map_)[item.node_id];
+  }
   for (int i = 0; i < item.num_outputs; ++i) {
     const TensorValue val = ctx->release_output(i);
     Entry* out = &outputs[i];
     DCHECK(out->state == Entry::State::NO_VALUE);
 
+    // Set the device context of the output entry.
+    out->device_context = device_context;
+    
     if (val.tensor == nullptr) {
       // Unless it's a Switch or a Recv, or the executor has marked the output
       // as not required, the node must produce a tensor value at i-th output.
@@ -1189,27 +1263,52 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
     if (inline_ready == nullptr) {
       // Schedule to run all the ready ops in thread pool.
       for (auto& tagged_node : *ready) {
-        RunTask([=]() { Process(tagged_node, scheduled_nsec); });
+        if (node_level_multistream &&
+            tagged_node.node_item->node_id < device_context_id_->size() &&
+            (*device_context_id_)[tagged_node.node_item->node_id] <
+                nlp_runners_.size()) {
+          nlp_runners_[(*device_context_id_)[tagged_node.node_item->node_id]](
+              [=]() { Process(tagged_node, scheduled_nsec); });
+        } else {
+          RunTask([=]() { Process(tagged_node, scheduled_nsec); });
+        }
       }
     } else {
       for (auto& tagged_node : *ready) {
         const NodeItem& item = *tagged_node.node_item;
-        if (tagged_node.get_is_dead() || !kernel_stats_->IsExpensive(item)) {
+        if (tagged_node.get_is_dead() ||
+            !kernel_stats_->IsExpensive(item) &&
+                (!node_level_multistream ||
+                 item.node_id >= device_context_id_->size() ||
+                 !NodeShouldSpecifyThreadPool(item))) {
           // Inline this inexpensive node.
           inline_ready->push_back(tagged_node);
         } else {
           if (curr_expensive_node) {
             // Dispatch to another thread since there is plenty of work to
             // do for this thread.
-            RunTask(std::bind(&ExecutorState::Process, this,
-                              *curr_expensive_node, scheduled_nsec));
+            if (node_level_multistream &&
+                tagged_node.node_item->node_id < device_context_id_->size() &&
+                (*device_context_id_)[tagged_node.node_item->node_id] <
+                    nlp_runners_.size()) {
+              nlp_runners_[(*device_context_id_)[tagged_node.node_item->node_id]](
+                  std::bind(&ExecutorState::Process, this, tagged_node,
+                            scheduled_nsec));
+            } else {
+              RunTask(std::bind(&ExecutorState::Process, this,
+                                *curr_expensive_node, scheduled_nsec));
+            }
           }
           curr_expensive_node = &tagged_node;
         }
       }
     }
     if (curr_expensive_node) {
-      if (inline_ready->empty()) {
+      if (inline_ready->empty() &&
+          (!node_level_multistream ||
+           curr_expensive_node->node_item->node_id >=
+               device_context_id_->size() ||
+           !NodeShouldSpecifyThreadPool(*(curr_expensive_node->node_item)))) {
         inline_ready->push_back(*curr_expensive_node);
       } else {
         // There are inline nodes to run already. We dispatch this expensive
@@ -1220,6 +1319,21 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
     }
   }
   ready->clear();
+}
+
+template <class PropagatorStateType>
+bool ExecutorState<PropagatorStateType>::NodeShouldSpecifyThreadPool(
+    const NodeItem& item) const {
+  // We don't need to specify the thread pool of the node only if all input
+  // nodes are in the same stream as the target node.
+  auto stream_id = (*device_context_id_)[item.node_id];
+  Node* node = immutable_state_.graph()->FindNodeId(item.node_id);
+  for (const Node* input_node : node->in_nodes()) {
+    if ((*device_context_id_)[input_node->id()] != stream_id) {
+      return true;
+    }
+  }
+  return false;
 }
 
 template <class PropagatorStateType>
@@ -1324,6 +1438,15 @@ void ExecutorState<PropagatorStateType>::Finish() {
     // devices like GPUs that continue to execute Ops after their Compute
     // methods have completed, this ensures that control is not returned to
     // the user until the step (and its side-effects) has actually completed.
+    if (node_level_multistream) {
+      size_t stream_num = device_mgr_->StreamGroupCount();
+      for (int i = 0; i < stream_num; ++i) {
+        Status status = device_mgr_->LookupStream(device, i)->Sync();
+        if (!status.ok()) {
+          LOG(FATAL) << "Stream Device " << i << " Sync() failed: " << status;
+        }
+      }
+    }
     device->Sync([this, step_id, runner = std::move(runner),
                   done_cb = std::move(done_cb)](const Status& status) mutable {
       delete this;

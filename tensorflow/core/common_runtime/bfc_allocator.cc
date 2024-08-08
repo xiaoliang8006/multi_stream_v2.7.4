@@ -38,12 +38,12 @@ namespace tensorflow {
 
 constexpr BFCAllocator::ChunkHandle BFCAllocator::kInvalidChunkHandle;
 
-BFCAllocator::BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
+BFCAllocator::BFCAllocator(std::unique_ptr<SubAllocator> sub_allocator, size_t total_memory,
                            bool allow_growth, const string& name,
                            const Options& opts)
     : garbage_collection_(opts.garbage_collection),
       coalesce_regions_(sub_allocator->SupportsCoalescing()),
-      sub_allocator_(sub_allocator),
+      sub_allocator_(std::move(sub_allocator)),
       name_(name),
       free_chunks_list_(kInvalidChunkHandle),
       next_allocation_id_(1) {

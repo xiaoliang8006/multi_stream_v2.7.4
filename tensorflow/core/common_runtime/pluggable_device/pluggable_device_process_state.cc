@@ -198,7 +198,7 @@ Allocator* PluggableDeviceProcessState::GetPluggableDeviceHostAllocator(
 
     BFCAllocator::Options opts;
     Allocator* allocator = new BFCAllocator(
-        sub_allocator, pluggable_device_host_mem_limit, true /*allow_growth*/,
+        absl::WrapUnique(sub_allocator), pluggable_device_host_mem_limit, true /*allow_growth*/,
         "pluggable_device_host_bfc" /*name*/, opts);
 
     if (LogMemory::IsEnabled() && !allocator->TracksAllocationSizes()) {

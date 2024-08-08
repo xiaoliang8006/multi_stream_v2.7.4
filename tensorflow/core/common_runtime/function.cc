@@ -1081,6 +1081,7 @@ void FunctionLibraryRuntimeImpl::ExecutorArgsFromOptions(
   } else {
     exec_args->runner = default_runner_;
   }
+  exec_args->nlp_runners = run_opts.nlp_runners;
   exec_args->collective_executor = run_opts.collective_executor;
   exec_args->call_frame = frame;
   exec_args->run_all_kernels_inline = run_opts.run_all_kernels_inline;

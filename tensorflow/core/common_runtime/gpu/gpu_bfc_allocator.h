@@ -64,7 +64,7 @@ class GPUBFCAllocator : public BFCAllocator {
   GPUBFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
                   const GPUOptions& gpu_options, const string& name,
                   double fragmentation_fraction = 0.0);
-  GPUBFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
+  GPUBFCAllocator(std::unique_ptr<SubAllocator> sub_allocator, size_t total_memory,
                   const string& name, const Options& opts);
   ~GPUBFCAllocator() override {}
 

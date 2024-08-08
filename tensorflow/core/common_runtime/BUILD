@@ -947,6 +947,7 @@ cc_library(
     hdrs = ["immutable_executor_state.h"],
     copts = tf_copts(),
     deps = [
+        ":device_mgr",
         ":graph_view",
         ":local_executor_params",
         ":pending_counts",

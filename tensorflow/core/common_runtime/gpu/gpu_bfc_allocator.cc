@@ -84,7 +84,7 @@ GPUBFCAllocator::GPUBFCAllocator(SubAllocator* sub_allocator,
                                  const GPUOptions& gpu_options,
                                  const string& name,
                                  double fragmentation_fraction)
-    : BFCAllocator(sub_allocator, total_memory,
+    : BFCAllocator(absl::WrapUnique(sub_allocator), total_memory,
                    GPUBFCAllocator::GetAllowGrowthValue(gpu_options), name, [&] {
             BFCAllocator::Options o;
             o.garbage_collection = GPUBFCAllocator::GetGarbageCollectionValue();
@@ -94,9 +94,9 @@ GPUBFCAllocator::GPUBFCAllocator(SubAllocator* sub_allocator,
 }
 
 GPUBFCAllocator::GPUBFCAllocator(
-    SubAllocator* sub_allocator, size_t total_memory,
+    std::unique_ptr<SubAllocator> sub_allocator, size_t total_memory,
     const std::string& name, const Options& opts)
-    : BFCAllocator(sub_allocator, total_memory, 
+    : BFCAllocator(std::move(sub_allocator), total_memory, 
       opts.allow_growth, name, [&] {
         BFCAllocator::Options o;
         o.allow_growth = opts.allow_growth;
