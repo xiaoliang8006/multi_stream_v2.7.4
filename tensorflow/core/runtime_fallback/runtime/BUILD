@@ -56,6 +56,7 @@ tf_cuda_library(
     ],
     cuda_deps = [
         "//tensorflow/core/common_runtime/gpu:gpu_bfc_allocator",
+        "//tensorflow/core/common_runtime/gpu:gpu_stream_aware_bfc_allocator",
         "//tensorflow/core/common_runtime/gpu:gpu_runtime_impl",
         "//tensorflow/core/platform:mutex",
         "@tf_runtime//backends/gpu:gpu_config",

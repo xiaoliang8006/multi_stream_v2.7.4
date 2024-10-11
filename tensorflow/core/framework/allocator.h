@@ -39,10 +39,12 @@ struct AllocationAttributes {
   AllocationAttributes() = default;
 
   AllocationAttributes(bool retry_on_failure, bool allocation_will_be_logged,
-                       std::function<uint64()>* freed_by_func)
+                       std::function<uint64()>* freed_by_func,
+                       int stream_to_allocate = -1)
       : retry_on_failure(retry_on_failure),
         allocation_will_be_logged(allocation_will_be_logged),
-        freed_by_func(freed_by_func) {}
+        freed_by_func(freed_by_func),
+        stream_to_allocate(stream_to_allocate) {}
 
   // If the first attempt to allocate the memory fails, the allocation should
   // wait and retry (with a timeout).
@@ -61,6 +63,8 @@ struct AllocationAttributes {
   // a memory chunk whose freed_at_count is at this value or earlier may be
   // returned.
   std::function<uint64()>* freed_by_func = nullptr;  // Not owned.
+
+  int stream_to_allocate = -1;
 
   TF_DISALLOW_COPY_AND_ASSIGN(AllocationAttributes);
 };
@@ -103,6 +107,14 @@ struct AllocatorStats {
         share_memory_pool(false) {}
 
   std::string DebugString() const;
+};
+
+// The type of the allocated memory.
+enum class AllocatorMemoryType {
+  kUnknown = 0,       // Memory type unknown.
+  kDevice = 1,        // Memory on device.
+  kHostPageable = 2,  // Memory on host and it is pagable.
+  kHostPinned = 3,    // Memory on host and it is pinned.
 };
 
 // Allocator is an abstract interface for allocating and deallocating
@@ -224,6 +236,11 @@ class Allocator {
   // stream this allocator is used for. This can also trigger memory
   // preallocation.
   virtual void SetStreamAndPreallocateMemory(void* stream) {}
+
+  // Returns the type of the memory allocated by this allocator.
+  virtual AllocatorMemoryType GetMemoryType() const {
+    return AllocatorMemoryType::kUnknown;
+  }
 };
 
 // An implementation of Allocator that delegates all calls to another Allocator.
@@ -274,6 +291,10 @@ class AllocatorWrapper : public Allocator {
 
   size_t AllocatedSizeSlow(const void* ptr) const override {
     return wrapped_->AllocatedSizeSlow(ptr);
+  }
+
+  AllocatorMemoryType GetMemoryType() const override {
+    return wrapped_->GetMemoryType();
   }
 
  private:
@@ -387,6 +408,11 @@ class SubAllocator {
   // Returns true if the BFC allocator can safely coalesce adjacent regions
   // returned by this allocator.
   virtual bool SupportsCoalescing() const = 0;
+
+  // Returns the type of the memory allocated by this SubAllocator.
+  virtual AllocatorMemoryType GetMemoryType() const {
+    return AllocatorMemoryType::kUnknown;
+  }
 
  protected:
   // Implementation of Alloc() method must call this on newly allocated

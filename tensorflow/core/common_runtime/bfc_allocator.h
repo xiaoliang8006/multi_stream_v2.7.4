@@ -105,6 +105,8 @@ class BFCAllocator : public Allocator {
 
   void SetSafeFrontier(uint64 count) override;
 
+  AllocatorMemoryType GetMemoryType() const override;
+
   bool ShouldRecordOpName() const { return true; }
 
   MemoryDump RecordMemoryMap();
@@ -117,14 +119,14 @@ class BFCAllocator : public Allocator {
     internal_fragmentation_fraction_ = fraction;
   }
 
- private:
+ protected:
   struct Bin;
 
-  void* AllocateRawInternal(size_t alignment, size_t num_bytes,
+  virtual void* AllocateRawInternal(size_t alignment, size_t num_bytes,
                             bool dump_log_on_failure,
                             uint64 freed_before_count);
 
-  void* AllocateRawInternalWithRetry(
+  virtual void* AllocateRawInternalWithRetry(
       size_t alignment, size_t num_bytes,
       const AllocationAttributes& allocation_attr);
 
@@ -460,7 +462,7 @@ class BFCAllocator : public Allocator {
   // Try to add a new memory region that can satisfy an allocation of
   // 'rounded_bytes' bytes.  Returns true on success and false on
   // failure.
-  bool Extend(size_t alignment, size_t rounded_bytes)
+  virtual bool Extend(size_t alignment, size_t rounded_bytes)
       TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Deallocate free regions to give back the memory to suballocator, so that
@@ -482,12 +484,13 @@ class BFCAllocator : public Allocator {
 
   // Splits the chunk specified by 'h' into two chunks, one at least
   // of size 'num_bytes'.
-  void SplitChunk(ChunkHandle h, size_t num_bytes)
+  virtual void SplitChunk(ChunkHandle h, size_t num_bytes)
       TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Merges the two chunk handles.  Requires that the chunks are
   // contiguous in their allocation.
-  void Merge(ChunkHandle h, ChunkHandle h2) TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+  virtual void Merge(ChunkHandle h, ChunkHandle h2)
+      TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Adds the chunk 'h' to the proper free bin.
   void InsertFreeChunkIntoBin(ChunkHandle h) TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
@@ -510,7 +513,7 @@ class BFCAllocator : public Allocator {
   MemoryDump RecordMemoryMapInternal() TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
   void MaybeWriteMemoryMap() TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  ChunkHandle AllocateChunk() TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+  virtual ChunkHandle AllocateChunk() TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
   void DeallocateChunk(ChunkHandle h) TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   Chunk* ChunkFromHandle(ChunkHandle h) TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
@@ -519,7 +522,7 @@ class BFCAllocator : public Allocator {
 
   void MarkFree(ChunkHandle h) TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at)
+  virtual ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at)
       TF_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Fragmentation is calculated as the reverse ratio of the largest free chunk
@@ -581,6 +584,8 @@ class BFCAllocator : public Allocator {
   Bin* BinForSize(size_t bytes) { return BinFromIndex(BinNumForSize(bytes)); }
 
   char bins_space_[sizeof(Bin) * kNumBins];
+
+  const Options opts_;
 
   // The size of the current region allocation.
   size_t curr_region_allocation_bytes_;

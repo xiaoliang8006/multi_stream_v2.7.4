@@ -135,6 +135,8 @@ class BaseGPUDevice : public LocalDevice {
     return stream_->compute->implementation()->GpuStreamMemberHack();
   }
 
+  se::Stream* GetComputeStream() { return stream_->compute; }
+  
   Status TryGetDeviceContext(DeviceContext** out_context) override {
     *out_context = device_context_;
     device_context_->Ref();

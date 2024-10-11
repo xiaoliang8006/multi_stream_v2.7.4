@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/gpu/gpu_debug_allocator.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_id.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_id_manager.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_stream_aware_bfc_allocator.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_init.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_virtual_mem_allocator.h"
 #include "tensorflow/core/common_runtime/pool_allocator.h"
@@ -475,6 +476,104 @@ Allocator* GPUProcessState::GetGpuHostAllocator(int numa_node,
   }
 }
 
+void GPUProcessState::GetGPUStreamAwareAllocators(
+    const GPUOptions& options, TfDeviceId tf_device_id, size_t total_bytes,
+    const std::vector<TfDeviceId>& peer_gpu_ids, size_t num_allocators,
+    std::vector<Allocator*>& allocators) {
+  Allocator* stream_aware_bfc = GetGPUStreamAwareAllocator(
+      options, tf_device_id, total_bytes, peer_gpu_ids);
+  if (tf_device_id.value() >=
+      static_cast<int64_t>(gpu_stream_aware_wrappers_.size())) {
+    gpu_stream_aware_wrappers_.resize(tf_device_id.value() + 1);
+  }
+  gpu_stream_aware_wrappers_[tf_device_id.value()].resize(num_allocators);
+  allocators.resize(num_allocators);
+  for (int i = 0; i < num_allocators; ++i) {
+    auto wrapper = absl::make_unique<GPUStreamAwareBFCWrapperAllocator>(
+        strings::StrCat("GPU_", tf_device_id.value(),
+                        "_stream_aware_bfc_wrapper"),
+        static_cast<GPUStreamAwareBFCAllocator*>(stream_aware_bfc));
+    allocators[i] = wrapper.get();
+    // don't move the above line below. Cause after std::move, it's empty
+    gpu_stream_aware_wrappers_[tf_device_id.value()][i] = std::move(wrapper);
+  }
+}
+Allocator* GPUProcessState::GetGPUStreamAwareAllocator(
+    const GPUOptions& options, TfDeviceId tf_device_id, size_t total_bytes,
+    const std::vector<TfDeviceId>& peer_gpu_ids) {
+#if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
+    (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
+  const string& allocator_type = options.allocator_type();
+  mutex_lock lock(mu_);
+  DeviceIdUtil::CheckValidTfDeviceId(
+      DEVICE_GPU, GPUMachineManager(), tf_device_id);
+  if (tf_device_id.value() >=
+      static_cast<int64_t>(gpu_stream_aware_allocators_.size())) {
+    gpu_stream_aware_allocators_.resize(tf_device_id.value() + 1);
+  }
+  Allocator* allocator =
+      gpu_stream_aware_allocators_[tf_device_id.value()].get();
+  if (allocator == nullptr) {
+    // Validate allocator types.
+    if (!allocator_type.empty() && allocator_type != "BFC") {
+      LOG(ERROR) << "Invalid allocator type: " << allocator_type;
+      return nullptr;
+    }
+    PlatformDeviceId platform_device_id;
+    TF_CHECK_OK(
+        GpuIdManager::TfToPlatformDeviceId(tf_device_id, &platform_device_id));
+    int bus_id = BusIdForGPU(tf_device_id);
+    DCHECK_GE(bus_id, 0);
+    while (bus_id >= gpu_stream_aware_visitors_.size()) {
+      gpu_stream_aware_visitors_.push_back({});
+    }
+    std::unique_ptr<SubAllocator> sub_allocator = CreateSubAllocator(
+        options, platform_device_id, gpu_stream_aware_visitors_[bus_id],
+        total_bytes, peer_gpu_ids, 0);
+    auto gpu_bfc_stream_aware_allocator =
+        absl::make_unique<GPUStreamAwareBFCAllocator>(
+            std::move(sub_allocator), total_bytes,
+            strings::StrCat("GPU_", tf_device_id.value(), "_stream_aware_bfc"),
+            [&] {
+              BFCAllocator::Options o;
+              o.allow_growth = options.allow_growth();
+              o.allow_retry_on_failure =
+                  !options.experimental()
+                       .disallow_retry_on_allocation_failure();
+              o.fragmentation_fraction =
+                  options.experimental().internal_fragmentation_fraction();
+              return o;
+            }());
+    allocator = gpu_bfc_stream_aware_allocator.get();
+    gpu_stream_aware_allocators_[tf_device_id.value()] =
+        std::move(gpu_bfc_stream_aware_allocator);
+    // SharedCounter* timing_counter = nullptr;
+    // GPUStreamAwareBFC disable timestamped functionality
+    // if (options.experimental().timestamped_allocator()) {
+    //   timing_counter = new SharedCounter;
+    //   gpu_bfc_stream_aware_allocator->SetTimingCounter(timing_counter);
+    // }
+    Allocator* recording_allocator = nullptr;
+    if (process_state_->ProcessState::FLAGS_brain_gpu_record_mem_types) {
+      ProcessState::MemDesc md;
+      md.loc = ProcessState::MemDesc::GPU;
+      md.dev_index = platform_device_id.value();
+      md.gpu_registered = false;
+      md.nic_registered = true;
+      recording_allocator = new internal::RecordingAllocator(
+          &process_state_->mem_desc_map_, allocator, md, &mu_);
+      return recording_allocator;
+    }
+  }
+  return allocator;
+#else
+  LOG(FATAL) << "GPUStreamAwareAllocator unavailable. Not compiled with "
+                "--config=cuda or "
+                "--config=rocm.";
+  return nullptr;
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+}
+
 void GPUProcessState::AddGPUAllocVisitor(int bus_id,
                                          const SubAllocator::Visitor& visitor,
                                          int stream_id) {
@@ -545,6 +644,7 @@ void GPUProcessState::TestOnlyReset() {
     mutex_lock lock(mu_);
     gpu_device_enabled_ = false;
     gpu_allocators_.clear();
+    gpu_stream_aware_allocators_.clear();
     gpu_visitors_.clear();
     gpu_host_allocators_.clear();
     gpu_host_alloc_visitors_.clear();

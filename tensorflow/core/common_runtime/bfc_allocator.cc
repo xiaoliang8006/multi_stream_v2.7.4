@@ -41,7 +41,8 @@ constexpr BFCAllocator::ChunkHandle BFCAllocator::kInvalidChunkHandle;
 BFCAllocator::BFCAllocator(std::unique_ptr<SubAllocator> sub_allocator, size_t total_memory,
                            bool allow_growth, const string& name,
                            const Options& opts)
-    : garbage_collection_(opts.garbage_collection),
+    : opts_(opts),
+      garbage_collection_(opts.garbage_collection),
       coalesce_regions_(sub_allocator->SupportsCoalescing()),
       sub_allocator_(std::move(sub_allocator)),
       name_(name),
@@ -1245,6 +1246,10 @@ BFCAllocator::get_bin_debug_info() {
     }
   }
   return bin_infos;
+}
+
+AllocatorMemoryType BFCAllocator::GetMemoryType() const {
+  return sub_allocator_->GetMemoryType();
 }
 
 }  // namespace tensorflow

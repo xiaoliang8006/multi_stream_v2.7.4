@@ -68,6 +68,7 @@ limitations under the License.
 #include "tensorflow/core/platform/rocm.h"
 #endif
 #include "tensorflow/core/common_runtime/device_mgr.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_stream_aware_bfc_allocator.h"
 #include "tensorflow/core/platform/fingerprint.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
@@ -1763,6 +1764,10 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
 
   GPUProcessState* process_state = GPUProcessState::singleton();
   std::vector<Allocator*> gpu_allocators;
+  bool use_stream_aware_bfc;
+  TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_GPU_STREAM_AWARE_BFC",
+                                             /*default_val=*/false,
+                                             &use_stream_aware_bfc));
   if (is_multi_stream_) {
     if (num_streams == 1) {
       // Don't create the StreamDevice if multi-stream is not enabled.
@@ -1771,6 +1776,11 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
     process_state->GetGPUAllocators(options.config.gpu_options(), tf_device_id,
                                     memory_limit, peer_gpu_ids, num_streams,
                                     gpu_allocators);
+    if (use_stream_aware_bfc) {
+      process_state->GetGPUStreamAwareAllocators(
+          options.config.gpu_options(), tf_device_id, memory_limit,
+          peer_gpu_ids, num_streams, gpu_allocators);
+    }
   } else {
     gpu_allocators.push_back(process_state->GetGPUAllocator(
         options.config.gpu_options(), tf_device_id, memory_limit,
@@ -1811,6 +1821,11 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
     }
     TF_RETURN_IF_ERROR(gpu_device->Init(options));
     gpu_allocators[i]->SetStreamAndPreallocateMemory(gpu_device->GetStream());
+
+    if (is_multi_stream_ && use_stream_aware_bfc) {
+      static_cast<GPUStreamAwareBFCWrapperAllocator*>(gpu_allocators[i])
+          ->SetComputeStream(i, gpu_device->GetComputeStream());
+    }
     devices->push_back(std::move(gpu_device));
   }
 
