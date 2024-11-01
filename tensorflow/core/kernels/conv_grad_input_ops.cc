@@ -354,9 +354,9 @@ void LaunchConv2DBackpropInputOp<GPUDevice, T>::operator()(
   static int64_t ConvolveBackwardDataScratchSize =
       GetDnnWorkspaceLimit("TF_CUDNN_WORKSPACE_LIMIT_IN_MB", workspace_bytes);
   DnnScratchAllocator scratch_allocator(ConvolveBackwardDataScratchSize, ctx);
-  int device_id = stream->parent()->device_ordinal();
   DataType dtype = out_backprop.dtype();
   ConvParameters conv_parameters = {
+      stream->parent(),
       dims.batch_size,                     // batch
       dims.in_depth,                       // in_depths
       {{input_desc.height(),               // in_rows
@@ -373,7 +373,6 @@ void LaunchConv2DBackpropInputOp<GPUDevice, T>::operator()(
       {{common_padding_rows,               // padding_rows
         common_padding_cols}},             // padding_cols
       dtype,                               // tensor data type
-      device_id,                           // device_id
       conv_desc.group_count()              // group_count
   };
 

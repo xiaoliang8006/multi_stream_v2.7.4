@@ -1102,9 +1102,10 @@ void LaunchConv2DOp<GPUDevice, T>::operator()(
       "TF_CUDNN_WORKSPACE_LIMIT_IN_MB", 1LL << 32  // 4GB
   );
 
-  int device_id = stream->parent()->device_ordinal();
   DataType dtype = input.dtype();
-  ConvParameters conv_parameters = {in_batch,             // batch
+  ConvParameters conv_parameters = {
+                                    stream->parent(),
+                                    in_batch,             // batch
                                     in_depths,            // in_depths
                                     {{in_rows,            // in_rows
                                       in_cols}},          // in_cols
@@ -1120,7 +1121,6 @@ void LaunchConv2DOp<GPUDevice, T>::operator()(
                                     {{common_padding_rows,    // padding_rows
                                       common_padding_cols}},  // padding_cols
                                     dtype,                    // tensor datatype
-                                    device_id,                // device_id
                                     conv_desc.group_count()};
 
   auto config_or = AutotuneUnfusedConv(

@@ -75,6 +75,9 @@ class DeviceMgr {
   // Get the number of stream groups.
   virtual int StreamGroupCount() const = 0;
 
+  // Returns true if one device has multi-stream enabled.
+  virtual bool DeviceHasMultipleStreams(const Device* device) const = 0;
+  
   // Assigns *device with pointer to StreamDevice of the device of the
   // given name and given stream_id.
   virtual Device* LookupStream(const Device* device,
@@ -109,6 +112,7 @@ class DynamicDeviceMgr : public DeviceMgr {
   int NumDeviceType(const string& type) const override;
   Device* HostCPU() const override;
   int StreamGroupCount() const override;
+  bool DeviceHasMultipleStreams(const Device* device) const override;
   Device* LookupStream(const Device* device,
                        const int stream_id) const override;
 
@@ -165,7 +169,7 @@ class DynamicDeviceMgr : public DeviceMgr {
   // Initialize the multi-stream related information.
   void InitStreamDevice();
 
-  int stream_group_count_;
+  int stream_group_count_ = 0;
   std::unordered_map<const Device*, std::vector<Device*>> stream_device_map_;
   
   TF_DISALLOW_COPY_AND_ASSIGN(DynamicDeviceMgr);

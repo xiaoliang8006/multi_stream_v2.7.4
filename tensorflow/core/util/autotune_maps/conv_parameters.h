@@ -60,17 +60,23 @@ class ConvParameters {
   // directory.  The two fused convolutions ultimately correspond to the same
   // cudnn calls, but have slightly different semantics (e.g. they interpret
   // padding differently).
-  ConvParameters(
+  ConvParameters(se::StreamExecutor* stream_exec,
       int64_t batch, int64_t in_depths, absl::Span<const int64_t> in,
       int data_format, int64_t out_depths, absl::Span<const int64_t> filter,
       absl::Span<const int64_t> dilation, absl::Span<const int64_t> stride,
-      absl::Span<const int64_t> padding, DataType dtype, int device_id,
+      absl::Span<const int64_t> padding, DataType dtype,
       int group_count,
       absl::optional<FusionInfo> fusion_info = absl::optional<FusionInfo>(),
       // This argument should be set only for test use.
       int version = kVersion);
 
-  ConvParameters(int device_id, const ConvParametersProto& proto);
+  ConvParameters(int device_id, const ConvParametersProto& proto,
+                 int stream_id = 0);
+
+  ConvParameters(se::StreamExecutor* stream_exec,
+                 const ConvParametersProto& proto)
+      : ConvParameters(stream_exec->device_ordinal(), proto,
+                       stream_exec->stream_id()) {}
 
   bool operator==(const ConvParameters& other) const;
 
@@ -85,9 +91,49 @@ class ConvParameters {
 
  private:
   int device_id_;
+  int stream_id_;
   ConvParametersProto proto_;
   uint64 hash_code_;
 };
+
+class MatmulParameters {
+ public:
+  // LINT.IfChange(matmul_parameters_version)
+  // A positive number that denotes the version of this class. Should be
+  // incremented everytime this class or ConvParametersProto are updated in a
+  // way that may invalidate autotune results.
+  static constexpr int kVersion = 2;
+  // LINT.ThenChange()
+
+  MatmulParameters(se::StreamExecutor* stream_exec, DataType ab_dtype,
+                   DataType c_dtype, bool trans_a, bool trans_b, uint64_t m,
+                   uint64_t n, uint64_t k, int64_t lda, int64_t ldb,
+                   int64_t ldc,
+                   stream_executor::dnn::ActivationMode activation_mode,
+                   // This argument should be set only for test use.
+                   int version = kVersion);
+
+  MatmulParameters(se::StreamExecutor* stream_exec,
+                   const MatmulParametersProto& proto);
+
+  bool operator==(const MatmulParameters& other) const;
+
+  bool operator!=(const MatmulParameters& other) const {
+    return !(*this == other);
+  }
+  uint64 hash() const { return hash_code_; }
+
+  string ToString() const;
+
+  const MatmulParametersProto& proto() const { return proto_; }
+
+ private:
+  int device_id_;
+  int stream_id_;
+  MatmulParametersProto proto_;
+  uint64 hash_code_;
+};
+
 }  // namespace tensorflow
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 

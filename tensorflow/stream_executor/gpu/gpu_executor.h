@@ -93,6 +93,7 @@ class GpuExecutor : public internal::StreamExecutorInterface {
       : device_(0),
         context_(nullptr),
         device_ordinal_(0),
+        stream_id_(-1),
         cc_major_(0),
         cc_minor_(0),
         version_(0),
@@ -103,7 +104,12 @@ class GpuExecutor : public internal::StreamExecutorInterface {
 
   ~GpuExecutor() override;
 
-  port::Status Init(int device_ordinal, DeviceOptions device_options) override;
+  port::Status Init(int device_ordinal, DeviceOptions device_options) override {
+    return Init(device_ordinal, -1, device_options);
+  }
+
+  port::Status Init(int device_ordinal, int stream_id,
+                    DeviceOptions device_options) override;
 
   port::Status GetKernel(const MultiKernelLoaderSpec& spec,
                          KernelBase* kernel) override;
@@ -382,6 +388,9 @@ class GpuExecutor : public internal::StreamExecutorInterface {
   // The device ordinal value that this executor was initialized with; recorded
   // for use in getting device metadata. Immutable post-initialization.
   int device_ordinal_;
+
+  // The stream group index value that this executor was initialized with.
+  int stream_id_;
 
   // The major version of the compute capability for device_.
   int cc_major_;

@@ -19,7 +19,6 @@ limitations under the License.
 #include <string>
 
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/platform/statusor.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 
 namespace tensorflow {
@@ -217,27 +216,27 @@ class DeviceNameUtils {
   static Status DeviceNameToCpuDeviceName(const std::string& device_name,
                                           std::string* host_device_name);
 
+  // Returns name of the stream device from the real device name if the
+  // multi-stream is enabled. For example, if the input device_name is
+  // "/device:GPU:0" and stream_id is 2, returns "/device:STREAM_GPU_0:2".
+  // Returns the input device_name if it cannot be stream-encoded.
+  static std::string GetStreamDeviceName(const std::string& device_name,
+                                         int stream_id);
+
+  // Returns name of the device from the stream-encoded name if the
+  // multi-stream is enabled. For example, if the input device_name is
+  // "/device:STREAM_GPU_0:2", returns "/device:GPU:0". Returns the input
+  // device_name if it's not a valid stream-encoded device name.
+  static std::string GetRealDeviceName(const std::string& device_name);
+
   // Returns true iff the device_name is in the format of
   // ".*STREAM_(C|G)PU_\d+:\d+$".
   static bool IsStreamDeviceName(const std::string& device_name);
 
-  // Returns name of the device from the stream-encoded name if the
-  // multi-stream is enabled. Otherwise returns the input name.
-  static tensorflow::StatusOr<std::string> GetDeviceNameFromStreamDeviceName(
-      const std::string& device_name);
-
-  // Returns device ordinal of the device from the stream-encoded name if the
-  // multi-stream is enabled.
-  static tensorflow::StatusOr<int> DecodeDeviceFromStreamDeviceName(
-      const std::string& device_name);
-
-  // Returns stream that is used from the stream-encoded name if the
-  // multi-stream is enabled.
-  static tensorflow::StatusOr<int> DecodeStreamFromStreamDeviceName(
-      const std::string& device_name);
-
-  // Returns true iff device_name1 and device_name2 have the same or
-  // are stream device names that represent the same device.
+  // Returns true iff device_name1 and device_name2 are the same, or one or
+  // both of them are stream device names and they represent the same real
+  // device, for example, "/device:STREAM_GPU_1:0" and
+  // "/device:STREAM_GPU_1:1".
   static bool HaveSameDeviceName(const std::string& device_name1,
                                  const std::string& device_name2);
 };

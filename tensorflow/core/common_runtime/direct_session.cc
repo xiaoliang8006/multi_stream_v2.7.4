@@ -333,6 +333,7 @@ DirectSession::DirectSession(const SessionOptions& options,
                                   device_mgr->StreamGroupCount())
                             : nullptr) {
   int thread_pool_size = options_.config.session_inter_op_thread_pool_size();
+  bool stream_share_pool;
   if (node_level_multistream) {
     // The number of thread pool must match the number of stream group
     int64_t gpu_stream_group_count;
@@ -340,14 +341,27 @@ DirectSession::DirectSession(const SessionOptions& options,
                                                 /*default_val=*/1,
                                                 &gpu_stream_group_count));
     thread_pool_size = gpu_stream_group_count;
+    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar(
+        "TF_GPU_STREAM_SHARE_THREAD_POOL",
+        /*default_val=*/false, &stream_share_pool));
   }
   if (thread_pool_size > 0) {
     for (int i = 0; i < thread_pool_size; ++i) {
       thread::ThreadPool* pool = nullptr;
       bool owned = false;
       if (node_level_multistream) {
-        init_error_.Update(NewThreadPoolFromThreadPoolOptions(
-            options_, ThreadPoolOptionProto(), i, &pool, &owned));
+        if (stream_share_pool) {
+          if (i == 0) {
+            init_error_.Update(NewThreadPoolFromThreadPoolOptions(
+                options_, ThreadPoolOptionProto(), i, &pool, &owned));
+          } else {
+            pool = thread_pools_[0].first;
+            owned = false;
+          }
+        } else {
+          init_error_.Update(NewThreadPoolFromThreadPoolOptions(
+              options_, ThreadPoolOptionProto(), i, &pool, &owned));
+        }
       } else {
         init_error_.Update(NewThreadPoolFromThreadPoolOptions(
             options_, options_.config.session_inter_op_thread_pool(i), i, &pool,
@@ -773,7 +787,11 @@ Status DirectSession::RunInternal(
     PrivateIntraProcessRendezvous rendezvous(device_mgr_.get());
     args.rendezvous = &rendezvous;
 
-    const auto& item = executors_and_keys->items[0];
+    const auto& item =
+        stream_group_idx == -1 || node_level_multistream ||
+                executors_and_keys->stream_items[0].size() <= stream_group_idx
+            ? executors_and_keys->items[0]
+            : executors_and_keys->stream_items[0][stream_group_idx];
     set_threadpool_args_for_item(item, &args);
     run_status = item.executor->Run(args);
   } else {
@@ -1400,7 +1418,9 @@ Status DirectSession::CreateExecutors(
   }
   ek->items.reserve(graphs.size());
   int stream_group_count = device_mgr_->StreamGroupCount();
-  if (stream_group_count > 0 && !node_level_multistream) {
+  bool use_multiple_executors =
+      stream_group_count > 0 && !node_level_multistream;
+  if (use_multiple_executors) {
     ek->stream_items.reserve(graphs.size());
   }
   const auto& optimizer_opts =
@@ -1422,24 +1442,6 @@ Status DirectSession::CreateExecutors(
             return Status::OK();
           }}));
 
-  if (stream_group_count > 0 && !node_level_multistream) {
-    func_info->stream_proc_flr.reserve(stream_group_count);
-    for (int executor_index = 0; executor_index < stream_group_count;
-        ++executor_index) {
-      func_info->stream_proc_flr.push_back(
-          std::make_unique<ProcessFunctionLibraryRuntime>(
-              device_mgr_.get(), options_.env, &options_.config,
-              graph_def_version, func_info->flib_def.get(), optimizer_opts,
-              thread_pools_[executor_index % thread_pools_.size()].first,
-              /*parent=*/nullptr, session_metadata,
-        Rendezvous::Factory{
-            [](const int64_t, const DeviceMgr* device_mgr, Rendezvous** r) {
-              *r = new IntraProcessRendezvous(device_mgr);
-              return Status::OK();
-              }}));
-    }
-  }
-
   GraphOptimizer optimizer(optimizer_opts);
   for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
     const string& partition_name = iter->first;
@@ -1449,141 +1451,93 @@ Status DirectSession::CreateExecutors(
     TF_RETURN_IF_ERROR(device_mgr_->LookupDevice(partition_name, &device));
 
     ek->items.resize(ek->items.size() + 1);
-    auto* item = &(ek->items.back());
-    auto lib = func_info->proc_flr->GetFLR(partition_name);
-    if (lib == nullptr) {
-      return errors::Internal("Could not find device: ", partition_name);
-    }
-    item->flib = lib;
-
-    LocalExecutorParams params;
-    params.device = device;
-    params.session_metadata = session_metadata;
-    params.function_library = lib;
-    auto opseg = device->op_segment();
-    params.create_kernel =
-        [this, lib, opseg](const std::shared_ptr<const NodeProperties>& props,
-                           OpKernel** kernel) {
-          // NOTE(mrry): We must not share function kernels (implemented
-          // using `CallOp`) between subgraphs, because `CallOp::handle_`
-          // is tied to a particular subgraph. Even if the function itself
-          // is stateful, the `CallOp` that invokes it is not.
-          if (!OpSegment::ShouldOwnKernel(lib, props->node_def.op())) {
-            return lib->CreateKernel(props, kernel);
-          }
-          auto create_fn = [lib, &props](OpKernel** kernel) {
-            return lib->CreateKernel(props, kernel);
-          };
-          // Kernels created for subgraph nodes need to be cached.  On
-          // cache miss, create_fn() is invoked to create a kernel based
-          // on the function library here + global op registry.
-          return opseg->FindOrCreate(session_handle_, props->node_def.name(),
-                                     kernel, create_fn);
-        };
-    params.delete_kernel = [lib](OpKernel* kernel) {
-      if (kernel && !OpSegment::ShouldOwnKernel(lib, kernel->type_string()))
-        delete kernel;
-    };
-
-    optimizer.Optimize(lib, options_.env, device, &partition_graph,
-                       GraphOptimizer::Options());
-
-    // TensorFlow Debugger (tfdbg) inserts debug nodes in the graph.
-    const DebugOptions& debug_options =
-        options.callable_options.run_options().debug_options();
-    if (!debug_options.debug_tensor_watch_opts().empty()) {
-      TF_RETURN_IF_ERROR(DecorateAndPublishGraphForDebug(
-          debug_options, partition_graph.get(), params.device));
-    }
-
-    TF_RETURN_IF_ERROR(EnsureMemoryTypes(DeviceType(device->device_type()),
-                                         device->name(),
-                                         partition_graph.get()));
-
-    item->executor = nullptr;
-    item->device = device;
-    auto executor_type = options_.config.experimental().executor_type();
-
-    // Create the multi-stream executors first.
-    if (stream_group_count > 0 && !node_level_multistream) {
+    bool device_use_multiple_executors = false;
+    if (use_multiple_executors) {
       ek->stream_items.resize(ek->stream_items.size() + 1);
-      auto* items = &(ek->stream_items.back());
-      items->reserve(stream_group_count);
-
-      std::vector<FunctionLibraryRuntime*> stream_libs;
-      for (size_t executor_index = 0; executor_index < stream_group_count;
-           ++executor_index) {
-        stream_libs.push_back(
-            func_info->stream_proc_flr[executor_index]->GetFLR(partition_name));
-      }
-      for (int executor_index = 0; executor_index < stream_group_count;
-           ++executor_index) {
-        items->resize(items->size() + 1);
-        auto* item = &(items->back());
-
-        auto lib = stream_libs[executor_index];
-        if (lib == nullptr) {
-          return errors::Internal("Could not find device: ", partition_name);
-        }
-        item->flib = lib;
-
-        static size_t const_stream_idx = 0;
-        LocalExecutorParams params;
-        params.device = device_mgr_->LookupStream(device, executor_index);
-        params.session_metadata = session_metadata;
-        params.function_library = lib;
-        params.create_kernel =
-            [this, lib, opseg, stream_group_count, &stream_libs](
-                const std::shared_ptr<const NodeProperties>& props,
-                OpKernel** kernel) {
-              // NOTE(mrry): We must not share function kernels (implemented
-              // using `CallOp`) between subgraphs, because `CallOp::handle_`
-              // is tied to a particular subgraph. Even if the function itself
-              // is stateful, the `CallOp` that invokes it is not.
-              if (!OpSegment::ShouldOwnKernel(lib, props->node_def.op())) {
-                return lib->CreateKernel(props, kernel);
-              }
-              auto create_fn = [lib, &props, stream_group_count,
-                                &stream_libs](OpKernel** kernel) {
-                if (props->node_def.op() == "Const") {
-                  const_stream_idx = (++const_stream_idx) % stream_group_count;
-                  return stream_libs[const_stream_idx]->CreateKernel(props,
-                                                                     kernel);
-                } else {
-                  return lib->CreateKernel(props, kernel);
-                }
-              };
-              // Kernels created for subgraph nodes need to be cached.  On
-              // cache miss, create_fn() is invoked to create a kernel based
-              // on the function library here + global op registry.
-              return opseg->FindOrCreate(
-                  session_handle_, props->node_def.name(), kernel, create_fn);
-            };
-        params.delete_kernel = [lib](OpKernel* kernel) {
-          if (kernel && !OpSegment::ShouldOwnKernel(lib, kernel->type_string()))
-            delete kernel;
-        };
-
-        // NewLocalExecutor takes ownership of dup_graph.
-        std::unique_ptr<Graph> dup_graph(new Graph(func_info->flib_def.get()));
-        CopyGraph(*partition_graph, dup_graph.get());
-        item->executor = nullptr;
-        item->device = params.device;
-        TF_RETURN_IF_ERROR(
-            NewExecutor(executor_type, params, *dup_graph, &item->executor));
-        if (!options_.config.experimental().disable_output_partition_graphs() ||
-            options_.config.graph_options().build_cost_model() > 0) {
-          item->graph = std::move(dup_graph);
-        }
+      if (device_mgr_->DeviceHasMultipleStreams(device)) {
+        ek->stream_items.back().resize(stream_group_count);
+        device_use_multiple_executors = true;
       }
     }
+    for (int exec_idx = 0;
+         exec_idx <= (device_use_multiple_executors ? stream_group_count : 0);
+         ++exec_idx) {
+      PerPartitionExecutorsAndLib* item;
+      Device* exec_device;
+      if (exec_idx == 0) {
+        // Create the original executor first, then stream-related executors.
+        item = &(ek->items.back());
+        exec_device = device;
+      } else {
+        item = &(ek->stream_items.back().at(exec_idx - 1));
+        exec_device = device_mgr_->LookupStream(device, exec_idx - 1);
+      }
+      auto lib = func_info->proc_flr->GetFLR(exec_device->name());
+      if (lib == nullptr) {
+        return errors::Internal("Could not find device: ", exec_device->name());
+      }
+      item->flib = lib;
 
-    // Create the original executor at last.
-    TF_RETURN_IF_ERROR(
-        NewExecutor(executor_type, params, *partition_graph, &item->executor));
-    if (!options_.config.experimental().disable_output_partition_graphs() ||
-        options_.config.graph_options().build_cost_model() > 0) {
-      item->graph = std::move(partition_graph);
+      LocalExecutorParams params;
+      params.device = exec_device;
+      params.session_metadata = session_metadata;
+      params.function_library = lib;
+      auto opseg = device->op_segment();
+      params.create_kernel =
+          [this, lib, opseg](const std::shared_ptr<const NodeProperties>& props,
+                             OpKernel** kernel) {
+            // NOTE(mrry): We must not share function kernels (implemented
+            // using `CallOp`) between subgraphs, because `CallOp::handle_`
+            // is tied to a particular subgraph. Even if the function itself
+            // is stateful, the `CallOp` that invokes it is not.
+            if (!OpSegment::ShouldOwnKernel(lib, props->node_def.op())) {
+              return lib->CreateKernel(props, kernel);
+            }
+            auto create_fn = [lib, &props](OpKernel** kernel) {
+              return lib->CreateKernel(props, kernel);
+            };
+            // Kernels created for subgraph nodes need to be cached.  On
+            // cache miss, create_fn() is invoked to create a kernel based
+            // on the function library here + global op registry.
+            return opseg->FindOrCreate(session_handle_, props->node_def.name(),
+                                       kernel, create_fn);
+          };
+      params.delete_kernel = [lib](OpKernel* kernel) {
+        if (kernel && !OpSegment::ShouldOwnKernel(lib, kernel->type_string()))
+          delete kernel;
+      };
+
+      if (exec_idx == 0) {
+        optimizer.Optimize(lib, options_.env, device, &partition_graph,
+                           GraphOptimizer::Options());
+
+        // TensorFlow Debugger (tfdbg) inserts debug nodes in the graph.
+        const DebugOptions& debug_options =
+            options.callable_options.run_options().debug_options();
+        if (!debug_options.debug_tensor_watch_opts().empty()) {
+          TF_RETURN_IF_ERROR(DecorateAndPublishGraphForDebug(
+              debug_options, partition_graph.get(), params.device));
+        }
+
+        TF_RETURN_IF_ERROR(EnsureMemoryTypes(DeviceType(device->device_type()),
+                                             device->name(),
+                                             partition_graph.get()));
+      } else {
+        partition_graph = std::make_unique<Graph>(func_info->flib_def.get());
+        CopyGraph(*ek->items.back().graph, partition_graph.get());
+      }
+
+      item->executor = nullptr;
+      item->device = device;
+      auto executor_type = options_.config.experimental().executor_type();
+
+      // Create the original executor at last.
+      TF_RETURN_IF_ERROR(
+          NewExecutor(executor_type, params, *partition_graph, &item->executor));
+      if (!options_.config.experimental().disable_output_partition_graphs() ||
+          options_.config.graph_options().build_cost_model() > 0) {
+        item->graph = std::move(partition_graph);
+      }
     }
   }
 

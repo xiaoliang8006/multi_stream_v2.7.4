@@ -55,12 +55,6 @@ class BackendOptions {
   BackendOptions& set_intra_op_parallelism_threads(int num_threads);
   int intra_op_parallelism_threads() const;
 
-  // Sets the stream group index for the given GPU device. This is useful for
-  // getting the corresponding StreamExecutor because every stream group has
-  // its own StreamExecutor.
-  BackendOptions& set_gpu_stream_group_index(int stream_group_inde);
-  int gpu_stream_group_index() const;
-
   // Sets the allowed_devices for selectively constructing stream executors
   // on the platform.
   BackendOptions& set_allowed_devices(
@@ -71,7 +65,6 @@ class BackendOptions {
   se::Platform* platform_ = nullptr;
   int intra_op_parallelism_threads_ = -1;
   absl::optional<std::set<int>> allowed_devices_;
-  int gpu_stream_group_index_ = 0;
 };
 
 // Class which encapsulates an XLA backend. It includes everything necessary

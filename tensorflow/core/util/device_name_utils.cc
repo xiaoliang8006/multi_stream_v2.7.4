@@ -621,34 +621,35 @@ std::vector<string> DeviceNameUtils::GetLocalNamesForDeviceMappings(
   return Status::OK();
 }
 
-/*static*/ bool DeviceNameUtils::IsStreamDeviceName(
-    const std::string& device_name) {
-  size_t pos = device_name.rfind("STREAM_GPU_");
-  if (pos == string::npos) {
-    pos = device_name.rfind("STREAM_CPU_");
-    if (pos == string::npos) {
-      return false;
-    }
+/*static*/ std::string DeviceNameUtils::GetStreamDeviceName(
+    const std::string& device_name, int stream_id) {
+  ParsedName p;
+  if (!ParseFullOrLocalName(device_name, &p)) {
+    VLOG(3) << "Device name cannot be parsed: " << device_name;
+    return device_name;
+  } else if (p.type != "GPU" && p.type != "gpu" && p.type != "CPU" &&
+             p.type != "cpu") {
+    VLOG(3) << "Device type not supported to covert to a stream device: "
+            << device_name;
+    return device_name;
   }
-  size_t pos_colon = device_name.find_last_of(":");
-  if (pos_colon == string::npos || pos > pos_colon) {
-    return false;
+  size_t pos = device_name.rfind(p.type);
+  std::string base_name = device_name.substr(0, pos);
+  std::string new_type;
+  if (p.type == "GPU" || p.type == "gpu") {
+    new_type = "STREAM_GPU_" + std::to_string(p.id);
+  } else {
+    new_type = "STREAM_CPU_" + std::to_string(p.id);
   }
-  int32_t device_id, stream_id;
-  if (!strings::safe_strto32(device_name.substr(pos + 11, pos_colon - pos - 11),
-                             &device_id) ||
-      !strings::safe_strto32(device_name.substr(pos_colon + 1), &stream_id)) {
-    return false;
-  }
-  return true;
+  return base_name + new_type + ":" + std::to_string(stream_id);
 }
 
-/*static*/ tensorflow::StatusOr<string>
-DeviceNameUtils::GetDeviceNameFromStreamDeviceName(const string& device_name) {
+/*static*/ std::string DeviceNameUtils::GetRealDeviceName(
+    const std::string& device_name) {
   if (!IsStreamDeviceName(device_name)) {
-    return tensorflow::Status(
-        tensorflow::error::INVALID_ARGUMENT,
-        absl::StrCat("Invalid stream device name: ", device_name));
+    VLOG(3) << "Device name is not a valid stream-encoded name: "
+            << device_name;
+    return device_name;
   }
   string output = device_name;
   size_t pos = output.rfind("STREAM_GPU_");
@@ -663,45 +664,24 @@ DeviceNameUtils::GetDeviceNameFromStreamDeviceName(const string& device_name) {
   return output;
 }
 
-/*static*/ tensorflow::StatusOr<int> DeviceNameUtils::DecodeDeviceFromStreamDeviceName(
-    const string& device_name) {
-  if (!IsStreamDeviceName(device_name)) {
-    return tensorflow::Status(
-        tensorflow::error::INVALID_ARGUMENT,
-        absl::StrCat("Invalid stream device name: ", device_name));
+/*static*/ bool DeviceNameUtils::IsStreamDeviceName(
+    const std::string& device_name) {
+  ParsedName p;
+  if (!ParseFullOrLocalName(device_name, &p) || !p.has_type ||
+      !(p.type.rfind("STREAM_GPU_") == 0 || p.type.rfind("STREAM_CPU_") == 0)) {
+    return false;
   }
-  size_t pos = device_name.rfind("STREAM_GPU_");
-  if (pos == string::npos) {
-    pos = device_name.rfind("STREAM_CPU_");
+  int32_t device_id;
+  if (!strings::safe_strto32(p.type.substr(11), &device_id)) {
+    return false;
   }
-  size_t pos_colon = device_name.find_last_of(":");
-  return std::stoi(device_name.substr(pos + 11, pos_colon - pos - 11));
-}
-
-/*static*/ tensorflow::StatusOr<int> DeviceNameUtils::DecodeStreamFromStreamDeviceName(
-    const string& device_name) {
-  if (!IsStreamDeviceName(device_name)) {
-    return tensorflow::Status(
-        tensorflow::error::INVALID_ARGUMENT,
-        absl::StrCat("Invalid stream device name: ", device_name));
-  }
-  return std::stoi(device_name.substr(device_name.find_last_of(":") + 1));
+  return true;
 }
 
 /*static*/ bool DeviceNameUtils::HaveSameDeviceName(
     const std::string& device_name1, const std::string& device_name2) {
   if (device_name1 == device_name2) return true;
-  std::string name1 = [&device_name1] {
-    tensorflow::StatusOr<std::string> name1 =
-        GetDeviceNameFromStreamDeviceName(device_name1);
-    return name1.ok() ? name1.ValueOrDie() : device_name1;
-  }();
-  std::string name2 = [&device_name2] {
-    tensorflow::StatusOr<std::string> name2 =
-        GetDeviceNameFromStreamDeviceName(device_name2);
-    return name2.ok() ? name2.ValueOrDie() : device_name2;
-  }();
-  return name1 == name2;
+  return GetRealDeviceName(device_name1) == GetRealDeviceName(device_name2);
 }
 
 std::ostream& operator<<(std::ostream& os,

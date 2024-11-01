@@ -91,6 +91,11 @@ struct AllocatorStats {
 
   int64_t largest_free_block_bytes;  // Largest free block's size in heap.
 
+  // Number of bytes of memory held by the allocator.  This may be higher than
+  // bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
+  absl::optional<int64_t> pool_bytes;
+  absl::optional<int64_t> peak_pool_bytes;
+
   // Set shared pool.
   bool share_memory_pool;
   mutex* shared_pool_lock;

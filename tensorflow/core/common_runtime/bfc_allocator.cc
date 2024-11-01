@@ -57,6 +57,11 @@ BFCAllocator::BFCAllocator(std::unique_ptr<SubAllocator> sub_allocator, size_t t
     curr_region_allocation_bytes_ = RoundedBytes(total_memory);
   }
 
+  // Initially, we have not allocated any memory from the sub-allocator; our
+  // pool of memory is empty.
+  stats_.pool_bytes = 0;
+  stats_.peak_pool_bytes = 0;
+
   // Allocate the requested amount of memory.
   memory_limit_ = total_memory;
   stats_.bytes_limit = static_cast<int64_t>(total_memory);
@@ -117,7 +122,7 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
     mutex_lock l(*stats_.shared_pool_lock);
     available_bytes = memory_limit_ - *stats_.shared_pool_bytes;
   } else {
-    available_bytes = memory_limit_ - total_region_allocated_bytes_;
+    available_bytes = memory_limit_ - *stats_.pool_bytes;
   }
   // Rounds available_bytes down to the nearest multiple of kMinAllocationSize.
   available_bytes = (available_bytes / kMinAllocationSize) * kMinAllocationSize;
@@ -168,9 +173,11 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
           << strings::HumanReadableNumBytes(bytes_received) << " bytes for "
           << Name() << ".";
 
-  total_region_allocated_bytes_ += bytes_received;
+  *stats_.pool_bytes += bytes_received;
+  *stats_.peak_pool_bytes =
+      std::max(*stats_.pool_bytes, *stats_.peak_pool_bytes);
   VLOG(1) << "Total allocated bytes: "
-          << strings::HumanReadableNumBytes(total_region_allocated_bytes_);
+          << strings::HumanReadableNumBytes(*stats_.pool_bytes);
 
   if (stats_.share_memory_pool) {
     mutex_lock l(*stats_.shared_pool_lock);
@@ -276,10 +283,24 @@ void* BFCAllocator::AllocateRaw(size_t unused_alignment, size_t num_bytes,
                                 const AllocationAttributes& allocation_attr) {
   VLOG(3) << "AllocateRaw " << Name() << "  " << num_bytes;
   void* result = [&] {
-    if (!allocation_attr.retry_on_failure) {
-      // Return immediately upon the first failure if this is for allocating an
-      // optional scratch space.
-      bool dump_log_on_failure = VLOG_IS_ON(2);
+    if (!opts_.allow_retry_on_failure || !allocation_attr.retry_on_failure) {
+      // If we have globally disabled retry-on-failure and fail to allocate an
+      // "important" alloc, we want to print a log, because the program may be
+      // about to fail due to OOM.
+      //
+      // Bit of a hack: We deem "important" allocs as those which are retryable.
+      // In TF, *non*-retryable allocations are usually those which we can
+      // tolerate failing.  For example, we allocate convolution scratch memory
+      // as non-retryable; if it fails, we'll just use a fallback algorithm that
+      // uses no scratch.
+      static std::atomic<int32> log_counter{0};
+      constexpr int kMaxFailureLogs = 10;
+      bool dump_log_on_failure =
+          (/*retry is globally disabled*/ !opts_.allow_retry_on_failure &&
+           /*alloc is "important"*/ allocation_attr.retry_on_failure &&
+           log_counter.load(std::memory_order_relaxed) < kMaxFailureLogs) ||
+          VLOG_IS_ON(2);
+
       uint64 freed_by_count = 0;
       if (allocation_attr.freed_by_func != nullptr) {
         freed_by_count = (*allocation_attr.freed_by_func)();
@@ -287,17 +308,18 @@ void* BFCAllocator::AllocateRaw(size_t unused_alignment, size_t num_bytes,
       void* res = AllocateRawInternal(unused_alignment, num_bytes,
                                       dump_log_on_failure, freed_by_count);
       if (res == nullptr) {
-        static std::atomic<int32> log_counter{0};
         int32 counter_value = log_counter.load(std::memory_order_relaxed);
-        if (counter_value < 10) {
+        if (counter_value < kMaxFailureLogs) {
           log_counter.store(counter_value + 1, std::memory_order_relaxed);
           LOG(WARNING)
               << "Allocator (" << Name() << ") ran out of memory trying "
               << "to allocate " << strings::HumanReadableNumBytes(num_bytes)
-              << " with freed_by_count=" << freed_by_count
-              << ". The caller indicates that this is not a failure, but"
-              << " may mean that there could be performance gains if more"
-              << " memory were available.";
+              << " with freed_by_count=" << freed_by_count << "."
+              << (!allocation_attr.retry_on_failure
+                      ? " The caller indicates that this is not a failure, but"
+                        " this may mean that there could be performance gains "
+                        "if more memory were available."
+                      : "");
         }
       }
       return res;
@@ -359,7 +381,7 @@ bool BFCAllocator::DeallocateFreeRegions(size_t rounded_bytes)
     available_bytes =
         memory_limit_ - *stats_.shared_pool_bytes + total_free_bytes;
   } else {
-    available_bytes = memory_limit_ - total_region_allocated_bytes_ + total_free_bytes;
+    available_bytes = memory_limit_ - *stats_.pool_bytes + total_free_bytes;
   }
   if (rounded_bytes > available_bytes) {
     return false;
@@ -411,7 +433,7 @@ void BFCAllocator::DeallocateRegions(
 
     // Deallocate the memory.
     sub_allocator_->Free(it->ptr(), it->memory_size());
-    total_region_allocated_bytes_ -= it->memory_size();
+    *stats_.pool_bytes -= it->memory_size();
     if (stats_.share_memory_pool) {
       mutex_lock l(*stats_.shared_pool_lock);
       *stats_.shared_pool_bytes -= it->memory_size();
@@ -515,8 +537,8 @@ int64_t BFCAllocator::LargestFreeChunk() {
 }
 
 double BFCAllocator::GetFragmentation() {
-  int64_t bytes_available = total_region_allocated_bytes_ - stats_.bytes_in_use;
-  DCHECK_GT(bytes_available, 0);
+  int64_t bytes_available = *stats_.pool_bytes - stats_.bytes_in_use;
+  DCHECK_GE(bytes_available, 0);
   return static_cast<double>(bytes_available - LargestFreeChunk()) /
          bytes_available;
 }
@@ -536,6 +558,12 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
                 memory_limit_ - stats_.bytes_reserved - stats_.bytes_in_use;
             const auto& annotation =
                 profiler::ScopedMemoryDebugAnnotation::CurrentAnnotation();
+            const auto op_name = annotation.pending_op_name
+                                     ? annotation.pending_op_name
+                                     : "(null)";
+            const auto region_type = annotation.pending_region_type
+                                         ? annotation.pending_region_type
+                                         : "(null)";
             return tensorflow::profiler::TraceMeEncode(
                 traceme_name, {{"allocator_name", name_},
                                {"bytes_reserved", stats_.bytes_reserved},
@@ -546,9 +574,9 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
                                {"requested_bytes", req_bytes},
                                {"allocation_bytes", alloc_bytes},
                                {"addr", reinterpret_cast<uint64>(chunk_ptr)},
-                               {"tf_op", annotation.pending_op_name},
+                               {"tf_op", op_name},
                                {"id", annotation.pending_step_id},
-                               {"region_type", annotation.pending_region_type},
+                               {"region_type", region_type},
                                {"data_type", annotation.pending_data_type},
                                {"shape", annotation.pending_shape_func()}});
           },
@@ -1106,10 +1134,9 @@ void BFCAllocator::DumpMemoryLog(size_t num_bytes) {
   }
   LOG(INFO) << "Sum Total of in-use chunks: "
             << strings::HumanReadableNumBytes(total_bytes);
-  LOG(INFO) << "total_region_allocated_bytes_: "
-            << total_region_allocated_bytes_
-            << " memory_limit_: " << memory_limit_ << " available bytes: "
-            << (memory_limit_ - total_region_allocated_bytes_)
+  LOG(INFO) << "Total bytes in pool: " << *stats_.pool_bytes
+            << " memory_limit_: " << memory_limit_
+            << " available bytes: " << (memory_limit_ - *stats_.pool_bytes)
             << " curr_region_allocation_bytes_: "
             << curr_region_allocation_bytes_;
   if (stats_.share_memory_pool) {

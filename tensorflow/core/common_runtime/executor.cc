@@ -344,7 +344,7 @@ class ExecutorState {
   // execution should dispatch work using this function instead of using runner_
   // directly.
   template <typename Closure>
-  void RunTask(Closure&& c);
+  void RunTask(Closure&& c, int sample_rate = 0);
 
   // Clean up when this executor is done.
   void Finish();
@@ -372,6 +372,11 @@ class ExecutorState {
   int64_t start_time_usecs_ = 0;
   // The deadline for the session to complete by. Empty if unspecified.
   absl::optional<absl::Time> deadline_;
+
+  // Maximum number of kernels that can be scheduled inline. If lots of kernels
+  // are ready at the same time, scheduling them in one thread can be very slow.
+  // TODO(fishx): Make it configurable if necessary.
+  static constexpr uint64 kInlineScheduleReadyThreshold = 500;
 
   // Not owned.
   RendezvousInterface* rendezvous_;
@@ -478,7 +483,7 @@ ExecutorState<PropagatorStateType>::~ExecutorState() {
 
 template <class PropagatorStateType>
 template <typename Closure>
-void ExecutorState<PropagatorStateType>::RunTask(Closure&& c) {
+void ExecutorState<PropagatorStateType>::RunTask(Closure&& c, int sample_rate) {
   // Align the atomic variables at 64 bytes to avoid false-sharing, assuming the
   // cacheline size is 64 bytes or smaller.
   alignas(64) static std::atomic<int64_t> num_enqueue_ops{0};
@@ -487,7 +492,7 @@ void ExecutorState<PropagatorStateType>::RunTask(Closure&& c) {
   auto n_enqueues = num_enqueue_ops.fetch_add(1, std::memory_order_relaxed);
   // Sample the queue length on every 16 enqueue operations. This amortizes the
   // cost of metric updates across 16 operations.
-  if (n_enqueues % 16 == 0) {
+  if (n_enqueues % std::max(16, sample_rate) == 0) {
     auto n_dequeues = num_dequeue_ops.load(std::memory_order_relaxed);
     metrics::UpdateGraphPendingQueueLength(n_enqueues - n_dequeues);
   }
@@ -1235,6 +1240,15 @@ bool ExecutorState<PropagatorStateType>::NodeDone(
 template <class PropagatorStateType>
 void ExecutorState<PropagatorStateType>::ScheduleReady(
     TaggedNodeSeq* ready, TaggedNodeReadyQueue* inline_ready) {
+  profiler::TraceMe activity(
+      [&]() {
+        return strings::StrCat(
+            "ExecutorState::ScheduleReady#",
+            "ready_size=", (ready == nullptr ? -1 : ready->size()),
+            ",inline_ready_size=",
+            (inline_ready == nullptr ? -1 : inline_ready->size()), "#");
+      },
+      profiler::GetTFTraceMeLevel(/*is_expensive=*/false));
   DCHECK(!ready->empty());
 
   int64_t scheduled_nsec = 0;
@@ -1260,6 +1274,7 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
     }
   } else {
     const TaggedNode* curr_expensive_node = nullptr;
+    TaggedNodeSeq expensive_nodes;
     if (inline_ready == nullptr) {
       // Schedule to run all the ready ops in thread pool.
       for (auto& tagged_node : *ready) {
@@ -1270,7 +1285,8 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
           nlp_runners_[(*device_context_id_)[tagged_node.node_item->node_id]](
               [=]() { Process(tagged_node, scheduled_nsec); });
         } else {
-          RunTask([=]() { Process(tagged_node, scheduled_nsec); });
+          RunTask([=]() { Process(tagged_node, scheduled_nsec); },
+                  /*sample_rate=*/ready->size());
         }
       }
     } else {
@@ -1285,19 +1301,7 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
           inline_ready->push_back(tagged_node);
         } else {
           if (curr_expensive_node) {
-            // Dispatch to another thread since there is plenty of work to
-            // do for this thread.
-            if (node_level_multistream &&
-                tagged_node.node_item->node_id < device_context_id_->size() &&
-                (*device_context_id_)[tagged_node.node_item->node_id] <
-                    nlp_runners_.size()) {
-              nlp_runners_[(*device_context_id_)[tagged_node.node_item->node_id]](
-                  std::bind(&ExecutorState::Process, this, tagged_node,
-                            scheduled_nsec));
-            } else {
-              RunTask(std::bind(&ExecutorState::Process, this,
-                                *curr_expensive_node, scheduled_nsec));
-            }
+            expensive_nodes.push_back(*curr_expensive_node);
           }
           curr_expensive_node = &tagged_node;
         }
@@ -1313,8 +1317,57 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
       } else {
         // There are inline nodes to run already. We dispatch this expensive
         // node to other thread.
-        RunTask(std::bind(&ExecutorState::Process, this, *curr_expensive_node,
+        expensive_nodes.push_back(*curr_expensive_node);
+      }
+    }
+    if (!expensive_nodes.empty()) {
+      if (expensive_nodes.size() < kInlineScheduleReadyThreshold) {
+        for (auto& tagged_node : expensive_nodes) {
+          if (node_level_multistream &&
+              tagged_node.node_item->node_id < device_context_id_->size() &&
+              (*device_context_id_)[tagged_node.node_item->node_id] <
+                  nlp_runners_.size()) {
+            nlp_runners_[(*device_context_id_)[tagged_node.node_item->node_id]](
+                std::bind(&ExecutorState::Process, this, tagged_node,
                           scheduled_nsec));
+          } else {
+            RunTask(std::bind(&ExecutorState::Process, this, tagged_node,
+                              scheduled_nsec),
+                    /*sample_rate=*/expensive_nodes.size());
+          }
+        }
+      } else {
+        // There are too many ready expensive nodes. Schedule them in child
+        // threads.
+        // TODO(fishx): Apply the same optimization to cheap ops as well since
+        // executing lots of cheap ops in one thread can potentially be the
+        // bottleneck as well.
+        auto it = expensive_nodes.begin();
+        while (it < expensive_nodes.end()) {
+          auto end = it;
+          std::advance(end, kInlineScheduleReadyThreshold);
+          if (end > expensive_nodes.end()) {
+            end = expensive_nodes.end();
+          }
+          TaggedNodeSeq ready_chunk{it, end};
+          RunTask(
+              [this, ready_chunk = std::move(ready_chunk), scheduled_nsec]() {
+                profiler::TraceMe activity(
+                    [&]() {
+                      return strings::StrCat(
+                          "ExecutorState::ScheduleReady::"
+                          "ChildThreadExpensiveNodes#",
+                          "ready_chunk_size=", ready_chunk.size(), "#");
+                    },
+                    profiler::GetTFTraceMeLevel(/*is_expensive=*/false));
+                for (auto& tagged_node : ready_chunk) {
+                  RunTask(std::bind(&ExecutorState::Process, this, tagged_node,
+                                    scheduled_nsec),
+                          /*sample_rate=*/ready_chunk.size());
+                }
+              });
+          it = end;
+        }
       }
     }
   }

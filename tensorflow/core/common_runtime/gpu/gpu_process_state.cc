@@ -435,13 +435,14 @@ Allocator* GPUProcessState::GetGpuHostAllocator(int numa_node,
     }
     int64_t gpu_host_mem_limit = gpu_host_mem_limit_in_mb * (1LL << 20);
 
-    BFCAllocator::Options opts;
+    BFCAllocator::Options allocator_opts;
+    allocator_opts.allow_growth = true;
     Allocator* allocator = 
         new BFCAllocator(
           absl::WrapUnique(sub_allocator), static_cast<size_t>(gpu_host_mem_limit),
           /*allow_growth=*/true,
           /*name=*/strings::StrCat("gpu_host_", stream_id, "_bfc"),
-          opts);
+          allocator_opts);
 
     if (LogMemory::IsEnabled() && !allocator->TracksAllocationSizes()) {
       // Wrap the allocator to track allocation ids for better logging
@@ -511,6 +512,7 @@ Allocator* GPUProcessState::GetGPUStreamAwareAllocator(
       static_cast<int64_t>(gpu_stream_aware_allocators_.size())) {
     gpu_stream_aware_allocators_.resize(tf_device_id.value() + 1);
   }
+
   Allocator* allocator =
       gpu_stream_aware_allocators_[tf_device_id.value()].get();
   if (allocator == nullptr) {

@@ -123,9 +123,10 @@ GpuExecutor::~GpuExecutor() {
   }
 }
 
-port::Status GpuExecutor::Init(int device_ordinal,
+port::Status GpuExecutor::Init(int device_ordinal, int stream_id,
                                DeviceOptions device_options) {
   device_ordinal_ = device_ordinal;
+  stream_id_ = stream_id;
 
   auto status = GpuDriver::Init();
   if (!status.ok()) {
@@ -137,8 +138,8 @@ port::Status GpuExecutor::Init(int device_ordinal,
     return status;
   }
 
-  status = GpuDriver::CreateContext(device_ordinal_, device_, device_options,
-                                    &context_);
+  status = GpuDriver::CreateContext(device_ordinal_, stream_id_, device_, 
+                                    device_options, &context_);
   if (!status.ok()) {
     return status;
   }
@@ -1011,12 +1012,12 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
                              CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z, device)
                              .ValueOrDie();
     builder.set_thread_dim_limit(thread_dim_limit);
-
-    int clock_rate =
-        GpuDriver::GetDeviceAttribute(CU_DEVICE_ATTRIBUTE_CLOCK_RATE, device)
-            .ValueOrDie();
-    builder.set_clock_rate_ghz(static_cast<float>(clock_rate) / 1e6);
   }
+
+  int clock_rate =
+      GpuDriver::GetDeviceAttribute(CU_DEVICE_ATTRIBUTE_CLOCK_RATE, device)
+          .ValueOrDie(); // sm_clock_khz
+  builder.set_clock_rate_ghz(static_cast<float>(clock_rate) / 1e6);
 
   {
     bool ecc_enabled = false;
@@ -1024,11 +1025,14 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
     builder.set_ecc_enabled(ecc_enabled);
   }
 
-  {
-    uint64_t device_memory_size = -1;
-    (void)GpuDriver::GetDeviceTotalMemory(device, &device_memory_size);
-    builder.set_device_memory_size(device_memory_size);
-  }
+  uint64_t device_memory_size = -1;
+  (void)GpuDriver::GetDeviceTotalMemory(device, &device_memory_size);
+  builder.set_device_memory_size(device_memory_size);
+
+  int64_t l2_cache_bytes =
+      GpuDriver::GetDeviceAttribute(CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, device)
+          .ValueOrDie();
+  builder.set_l2_cache_size(l2_cache_bytes);
 
   port::StatusOr<int> mem_clock_khz = GpuDriver::GetDeviceAttribute(
       CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, device_ordinal);
@@ -1067,8 +1071,8 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
       GpuDriver::GetMaxSharedMemoryPerCore(device).ValueOrDie());
   builder.set_shared_memory_per_block(
       GpuDriver::GetMaxSharedMemoryPerBlock(device).ValueOrDie());
-  builder.set_core_count(
-      GpuDriver::GetMultiprocessorCount(device).ValueOrDie());
+  int core_count = GpuDriver::GetMultiprocessorCount(device).ValueOrDie();
+  builder.set_core_count(core_count);
   builder.set_threads_per_core_limit(
       GpuDriver::GetMaxThreadsPerMultiprocessor(device).ValueOrDie());
   builder.set_registers_per_block_limit(
@@ -1079,6 +1083,24 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
       GpuDriver::GetDeviceAttribute(
           CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, device)
           .ValueOrDie());
+
+  auto value_or = [](const auto& status_or, auto default_val) {
+    if (status_or.ok()) return *status_or;
+    return default_val;
+  };
+
+  // It would be better to use the PCI device ID or some other truly unique
+  // identifier for the GPU model.  But getting this requires using NVML or
+  // other hacks, which we don't have access to in OSS TensorFlow.
+  //
+  // Alternatively you might be tempted to use GpuDriver::GetDeviceName as a
+  // unique identifier, but this is not stable across GPU VBIOS versions.
+  //
+  // For now, this identifier is good enough.
+  builder.set_model_str(absl::StrFormat(
+      "sm_%d.%d with %dB RAM, %d cores, %dKHz clock, %dKHz mem clock, %dB L2$",
+      cc_major, cc_minor, device_memory_size, core_count, clock_rate,
+      value_or(mem_clock_khz, 0), l2_cache_bytes));
 
   return builder.Build();
 }

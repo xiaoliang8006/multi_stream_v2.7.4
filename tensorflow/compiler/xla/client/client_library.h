@@ -48,8 +48,7 @@ class LocalClientOptions {
   LocalClientOptions(
       se::Platform* platform = nullptr, int number_of_replicas = 1,
       int intra_op_parallelism_threads = -1,
-      const absl::optional<std::set<int>>& allowed_devices = absl::nullopt,
-      int gpu_stream_group_index = 0);
+      const absl::optional<std::set<int>>& allowed_devices = absl::nullopt);
 
   // Set the platform backing the service, or nullptr for the default platform.
   LocalClientOptions& set_platform(se::Platform* platform);
@@ -70,15 +69,10 @@ class LocalClientOptions {
       const absl::optional<std::set<int>>& allowed_devices);
   const absl::optional<std::set<int>>& allowed_devices() const;
 
-  // Sets the stream group index for the given GPU device.
-  LocalClientOptions& set_gpu_stream_group_index(int stream_group_index);
-  int gpu_stream_group_index() const;
-
  private:
   se::Platform* platform_;
   int number_of_replicas_;
   int intra_op_parallelism_threads_;
-  int gpu_stream_group_index_;
   absl::optional<std::set<int>> allowed_devices_;
 };
 
@@ -139,8 +133,7 @@ class ClientLibrary {
   };
 
   tensorflow::mutex service_mutex_;  // Guards the singleton creation state.
-  std::unordered_map<se::Platform::Id,
-                     std::vector<std::unique_ptr<LocalInstance>>>
+  std::unordered_map<se::Platform::Id, std::unique_ptr<LocalInstance>>
       local_instances_ TF_GUARDED_BY(service_mutex_);
 
   std::unordered_map<se::Platform::Id, std::unique_ptr<CompileOnlyInstance>>

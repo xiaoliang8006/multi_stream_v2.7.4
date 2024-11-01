@@ -915,6 +915,23 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
       GpuDriver::GetThreadsPerWarp(device).ValueOrDie());
   builder.set_registers_per_core_limit(64 * 1024);
 
+  int cc_major = 0;
+  int cc_minor = 0;
+  GpuDriver::GetComputeCapability(&cc_major, &cc_minor, device).IgnoreError();
+
+  // It would be better to use the PCI device ID or some other truly unique
+  // identifier for the GPU model.  But getting this requires using NVML or
+  // other hacks, which we don't have access to in OSS TensorFlow.
+  //
+  // Alternatively you might be tempted to use GpuDriver::GetDeviceName as a
+  // unique identifier, but this is not stable across GPU VBIOS versions.
+  //
+  // TODO(jlebar): This really should be more unique.  In CUDA land, we mix in
+  // the clock speed and L2 cache size.
+  builder.set_model_str(absl::StrFormat("cc_%d.%d with %dB RAM, %d cores",
+                                        cc_major, cc_minor, device_memory_size,
+                                        core_count));
+
   return builder.Build();
 }
 

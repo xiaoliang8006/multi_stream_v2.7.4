@@ -28,12 +28,11 @@ limitations under the License.
 
 namespace tensorflow {
 
-DynamicDeviceMgr::DynamicDeviceMgr()
-    : cpu_device_(nullptr), stream_group_count_(0) {}
+DynamicDeviceMgr::DynamicDeviceMgr() : cpu_device_(nullptr) {}
 
 DynamicDeviceMgr::DynamicDeviceMgr(
     std::vector<std::unique_ptr<Device>> devices)
-    : cpu_device_(nullptr), stream_group_count_(0){
+    : cpu_device_(nullptr) {
   Status status = AddDevices(std::move(devices));
   CHECK(status.ok());  // Crash OK
   InitStreamDevice();
@@ -253,71 +252,50 @@ Device* DynamicDeviceMgr::HostCPU() const {
 }
 
 void DynamicDeviceMgr::InitStreamDevice() {
-  // Counts how many StreamDevices there are within a GPU/CPU.
-  std::unordered_map<int, size_t> gpu_id2num, cpu_id2num;
+  // Real devices and stream devices are all in dynamic_devices_. We should
+  // count how many stream devices there are belonging to one real device.
+  std::unordered_map<string, size_t> stream_num_map;
   for (int i = 0; i < dynamic_devices_.size(); ++i) {
     Device* d = dynamic_devices_[i].get();
-    tensorflow::StatusOr<int> idx =
-        DeviceNameUtils::DecodeDeviceFromStreamDeviceName(d->name());
-    if (idx.ok()) {
-      if (d->parsed_name().type.find("STREAM_GPU_") != string::npos) {
-        if (gpu_id2num.find(idx.ValueOrDie()) == gpu_id2num.end()) {
-          gpu_id2num[idx.ValueOrDie()] = 1;
-        } else {
-          ++gpu_id2num[idx.ValueOrDie()];
-        }
+    if (DeviceNameUtils::IsStreamDeviceName(d->name())) {
+      string name = DeviceNameUtils::GetRealDeviceName(d->name());
+      if (stream_num_map.find(name) == stream_num_map.end()) {
+        stream_num_map[name] = 1;
       } else {
-        if (cpu_id2num.find(idx.ValueOrDie()) == cpu_id2num.end()) {
-          cpu_id2num[idx.ValueOrDie()] = 1;
-        } else {
-          ++cpu_id2num[idx.ValueOrDie()];
-        }
+        ++stream_num_map[name];
       }
     }
   }
-
-  // Create stream group map.
-  Device* gpu;
-  for (auto& item : gpu_id2num) {
-    TF_CHECK_OK(
-        LookupDevice(strings::StrCat("/device:GPU:", item.first), &gpu));
-    stream_device_map_[gpu] = std::vector<Device*>(item.second);
+  // Create stream device maps and set real device for the stream devices.
+  Device* device;
+  for (auto& item : stream_num_map) {
+    TF_CHECK_OK(LookupDevice(item.first, &device));
+    stream_device_map_[device] = std::vector<Device*>(item.second);
     if (stream_group_count_ < item.second) stream_group_count_ = item.second;
   }
-  Device* cpu;
-  for (auto& item : cpu_id2num) {
-    TF_CHECK_OK(
-        LookupDevice(strings::StrCat("/device:CPU:", item.first), &cpu));
-    stream_device_map_[cpu] = std::vector<Device*>(item.second);
-  }
-
-  // Fill in the stream group map and set real device for the stream devices.
   Device* real_device;
   for (int i = 0; i < dynamic_devices_.size(); ++i) {
     Device* d = dynamic_devices_[i].get();
-    tensorflow::StatusOr<string> name =
-        DeviceNameUtils::GetDeviceNameFromStreamDeviceName(d->name());
-    if (name.ok()) {
-      TF_CHECK_OK(LookupDevice(name.ValueOrDie(), &real_device));
+    if (DeviceNameUtils::IsStreamDeviceName(d->name())) {
+      TF_CHECK_OK(LookupDevice(DeviceNameUtils::GetRealDeviceName(d->name()),
+                               &real_device));
       stream_device_map_[real_device][d->parsed_name().id] = d;
       d->SetRealDevice(real_device);
     }
   }
-
-  for (auto& item : gpu_id2num) {
-    DCHECK_EQ(item.second, stream_group_count_);
-  }
-  for (auto& item : cpu_id2num) {
-    DCHECK_EQ(item.second, stream_group_count_);
-  }
+  for (auto& item : stream_num_map) DCHECK_EQ(item.second, stream_group_count_);
 }
 
 int DynamicDeviceMgr::StreamGroupCount() const { return stream_group_count_; }
 
+bool DynamicDeviceMgr::DeviceHasMultipleStreams(const Device* device) const {
+  if (stream_device_map_.find(device) != stream_device_map_.end()) return true;
+  return false;
+}
+
 Device* DynamicDeviceMgr::LookupStream(const Device* device,
                                        const int stream_id) const {
-  if (stream_id < 0 ||
-      stream_device_map_.find(device) == stream_device_map_.end() ||
+  if (stream_id < 0 || !DeviceHasMultipleStreams(device) ||
       stream_device_map_.at(device).size() <= stream_id) {
     return const_cast<Device*>(device);
   }

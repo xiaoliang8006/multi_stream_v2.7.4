@@ -603,6 +603,10 @@ Status XlaCompilationCache::CompileImpl(
 
   if (state == CompileState::kUncompiled) {
     XLA_SCOPED_LOGGING_TIMER("Compilation of XLA executable");
+    if (options.stream_id > 0) {
+      VLOG(2) << "Not compiling for stream group " << options.stream_id;
+      return Status::OK();
+    }
     if (!ShouldCompileCluster(compile_mode, is_megamorphic, is_first_execution,
                               current_request_count, function)) {
       VLOG(2) << "Not compiling for signature: " << human_signature;

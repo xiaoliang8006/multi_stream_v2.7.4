@@ -238,7 +238,6 @@ class DirectSession : public Session {
   struct FunctionInfo {
     std::unique_ptr<FunctionLibraryDefinition> flib_def;
     std::unique_ptr<ProcessFunctionLibraryRuntime> proc_flr;
-    std::vector<std::unique_ptr<ProcessFunctionLibraryRuntime>> stream_proc_flr;
   };
 
   // For each live Run() call, the session maintains a RunState.
