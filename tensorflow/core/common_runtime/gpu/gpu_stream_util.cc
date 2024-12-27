@@ -33,8 +33,12 @@ limitations under the License.
 namespace tensorflow {
 namespace gpu_stream_util {
 
+void removeCarriageReturns(std::string &line) {
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+}
+
 bool ReadRuleFromFile(
-    std::unordered_map<int, std::vector<std::regex>>& stream_assign_rule) {
+    std::unordered_map<int, std::vector<std::string>>& stream_assign_rule) {
   // Determine a suitable stream to use.
   static const string stream_from_file = [] {
     string stream_from_file;
@@ -49,13 +53,12 @@ bool ReadRuleFromFile(
       while (std::getline(file, line)) {
         std::vector<string> kv = tensorflow::str_util::Split(line, ":");
         std::vector<string> pattern = tensorflow::str_util::Split(kv[1], ",");
-        std::vector<std::regex> re_pattern;
         for (string& p : pattern) {
-          re_pattern.push_back(std::regex(p));
+          removeCarriageReturns(p);
         }
-        VLOG(2) << "Read " << re_pattern.size() << " rules for stream "
+        VLOG(2) << "Read " << pattern.size() << " rules for stream "
                 << atoi(kv[0].c_str());
-        stream_assign_rule[atoi(kv[0].c_str())] = std::move(re_pattern);
+        stream_assign_rule[atoi(kv[0].c_str())] = std::move(pattern);
       }
       file.close();
     } else {
@@ -81,10 +84,11 @@ int GetFromProto(Node* n, int num_streams) {
 
 int GetFromRule(
     Node* n, int num_streams,
-    std::unordered_map<int, std::vector<std::regex>>& stream_assign_rule) {
+    std::unordered_map<int, std::vector<std::string>>& stream_assign_rule) {
   for (const auto& item : stream_assign_rule) {
     for (auto& r : item.second) {
-      if (std::regex_match(n->name(), r)) {
+      std::regex pattern(r);
+      if (std::regex_search(n->name(), pattern)) {
         return item.first;
       }
     }
@@ -225,7 +229,7 @@ Status AssignStreams(const Graph* graph, const AssignStreamsOpts& opts,
     }
   }
 
-  std::unordered_map<int, std::vector<std::regex>> stream_assign_rule;
+  std::unordered_map<int, std::vector<std::string>> stream_assign_rule;
   bool has_rule = ReadRuleFromFile(stream_assign_rule);
   int highest_stream_id = -1;
   for (Node* n : order) {

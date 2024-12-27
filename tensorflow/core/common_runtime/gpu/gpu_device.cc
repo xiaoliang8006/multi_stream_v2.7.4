@@ -738,7 +738,8 @@ void BaseGPUDevice::WaitOnStream(OpKernel* op_kernel, OpKernelContext* context,
   std::unordered_map<se::Stream*, std::vector<std::string>> need_sync_stream;
 
   std::string key_info = "";
-  TRY_APPEND_KEY_INFO("Node: " + context->node_type(op_kernel->name()) + ", " +
+  // TRY_APPEND_KEY_INFO("Node: " + context->node_type(op_kernel->name()) + ", " +
+  TRY_APPEND_KEY_INFO("Node: " +
                       op_kernel->name() + ", on stream " +
                       std::to_string(stream_id));
 
