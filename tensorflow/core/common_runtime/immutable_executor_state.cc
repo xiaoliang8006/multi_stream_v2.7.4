@@ -280,7 +280,7 @@ void ImmutableExecutorState::FillContextMap() {
     return;
   }
   if (device_mgr_ != nullptr) {
-    DeviceContext* ctx;
+    DeviceContext* ctx = nullptr;
     Status s;
     for (auto it : device_context_id_) {
       s = device_mgr_->LookupStream(device, it)->TryGetDeviceContext(&ctx);

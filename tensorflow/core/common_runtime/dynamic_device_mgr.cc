@@ -279,7 +279,8 @@ void DynamicDeviceMgr::InitStreamDevice() {
     if (DeviceNameUtils::IsStreamDeviceName(d->name())) {
       TF_CHECK_OK(LookupDevice(DeviceNameUtils::GetRealDeviceName(d->name()),
                                &real_device));
-      stream_device_map_[real_device][d->parsed_name().id] = d;
+      int stream_id = std::stoi(d->name().substr(d->name().find_last_of("_")+1, 1));
+      stream_device_map_[real_device][stream_id] = d;
       d->SetRealDevice(real_device);
     }
   }

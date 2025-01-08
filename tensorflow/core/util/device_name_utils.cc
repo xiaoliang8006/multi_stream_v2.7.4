@@ -637,11 +637,11 @@ std::vector<string> DeviceNameUtils::GetLocalNamesForDeviceMappings(
   std::string base_name = device_name.substr(0, pos);
   std::string new_type;
   if (p.type == "GPU" || p.type == "gpu") {
-    new_type = "STREAM_GPU_" + std::to_string(p.id);
+    new_type = "STREAM_GPU_" + std::to_string(stream_id);
   } else {
-    new_type = "STREAM_CPU_" + std::to_string(p.id);
+    new_type = "STREAM_CPU_" + std::to_string(stream_id);
   }
-  return base_name + new_type + ":" + std::to_string(stream_id);
+  return base_name + new_type + ":" + std::to_string(p.id);
 }
 
 /*static*/ std::string DeviceNameUtils::GetRealDeviceName(
@@ -652,14 +652,15 @@ std::vector<string> DeviceNameUtils::GetLocalNamesForDeviceMappings(
     return device_name;
   }
   string output = device_name;
+  std::string device_id = output.substr(output.find_last_of(":") + 1);
+
   size_t pos = output.rfind("STREAM_GPU_");
   if (pos != string::npos) {
-    output.replace(pos, 11, "GPU:");
-    output.erase(output.find_last_of(":"));
+    output.erase(pos);
+    output = strings::StrCat(output, "GPU:", device_id);
   } else {
-    pos = output.rfind("STREAM_CPU_");
-    output.replace(pos, 11, "CPU:");
-    output.erase(output.find_last_of(":"));
+    output.erase(output.rfind("STREAM_CPU_"));
+    output = strings::StrCat(output, "CPU:", device_id);
   }
   return output;
 }
@@ -672,7 +673,7 @@ std::vector<string> DeviceNameUtils::GetLocalNamesForDeviceMappings(
     return false;
   }
   int32_t device_id;
-  if (!strings::safe_strto32(p.type.substr(11), &device_id)) {
+  if (!strings::safe_strto32(device_name.substr(device_name.find_last_of(":")+1), &device_id)) {
     return false;
   }
   return true;

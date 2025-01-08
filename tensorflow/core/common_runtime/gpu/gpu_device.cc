@@ -1817,7 +1817,7 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
     // stats->bytes_limit.
     int64_t bytes_limit = stats->bytes_limit ? *stats->bytes_limit : 0;
     const string stream_name = strings::StrCat(
-        name_prefix, "/device:STREAM_GPU_", tf_device_id.value(), ":", i);
+        name_prefix, "/device:STREAM_GPU_", i, ":", tf_device_id.value());
     std::unique_ptr<BaseGPUDevice> gpu_device = CreateGPUDevice(
         options, is_multi_stream_ ? stream_name : device_name,
         static_cast<Bytes>(bytes_limit), dev_locality, tf_device_id,
