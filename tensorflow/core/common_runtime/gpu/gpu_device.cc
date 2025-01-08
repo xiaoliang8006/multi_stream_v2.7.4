@@ -1769,23 +1769,33 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
   TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_GPU_STREAM_AWARE_BFC",
                                              /*default_val=*/false,
                                              &use_stream_aware_bfc));
+  float env_gpu_memory_fraction = 1.0;
+  TF_CHECK_OK(ReadFloatFromEnvVar("TF_GPU_MEMORY_FRACTION",
+                  /*default_val=*/1.0, &env_gpu_memory_fraction));
   if (is_multi_stream_) {
     if (num_streams == 1) {
+      LOG(INFO) << "[STREAM INFO] num_streams is 1, just skip.";
       // Don't create the StreamDevice if multi-stream is not enabled.
       return Status::OK();
     }
-    process_state->GetGPUAllocators(options.config.gpu_options(), tf_device_id,
-                                    memory_limit, peer_gpu_ids, num_streams,
-                                    gpu_allocators);
     if (use_stream_aware_bfc) {
+      LOG(INFO) << "[STREAM INFO] use_stream_aware_bfc.";
+      memory_limit *= env_gpu_memory_fraction;
       process_state->GetGPUStreamAwareAllocators(
+          options.config.gpu_options(), tf_device_id, memory_limit,
+          peer_gpu_ids, num_streams, gpu_allocators);
+    } else {
+      LOG(INFO) << "[STREAM INFO] multi stream use multi allocator.";
+      process_state->GetGPUAllocators(
           options.config.gpu_options(), tf_device_id, memory_limit,
           peer_gpu_ids, num_streams, gpu_allocators);
     }
   } else {
+    LOG(INFO) << "[STREAM INFO] execute single stream.";
+    memory_limit *= env_gpu_memory_fraction;
     gpu_allocators.push_back(process_state->GetGPUAllocator(
-        options.config.gpu_options(), tf_device_id, memory_limit,
-        peer_gpu_ids));
+        options.config.gpu_options(), tf_device_id,
+        memory_limit, peer_gpu_ids));
   }
   if (!gpu_allocators.size()) {
     return errors::Internal("Failed to get memory allocator for TF GPU ",

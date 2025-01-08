@@ -290,18 +290,39 @@ void GPUProcessState::GetGPUAllocators(
     const GPUOptions& options, TfDeviceId tf_device_id, size_t total_bytes,
     const std::vector<TfDeviceId>& peer_gpu_ids, size_t num_allocators,
     std::vector<Allocator*>& allocators) {
+  std::vector<string> gpu_memory_fractions{};
   // Divide the memory by stream group count if async allocator is not used
   // and don't share_memory_pool between stream groups.
   if ((UseCudaMemoryGuardAllocator() || UseCudaMallocAllocator() ||
        (!UseCudaMallocAsyncAllocator() &&
         !options.experimental().use_cuda_malloc_async())) &&
       !share_memory_pool) {
-    total_bytes /= num_allocators;
+    // total_bytes /= num_allocators;
+    LOG(INFO) << "[STREAM INFO] Divide the memory by stream.";
+    std::string env_gpu_memory_fractions = "";
+    TF_CHECK_OK(ReadStringFromEnvVar("TF_GPU_MEMORY_FRACTIONS",
+                                    /*default_val=*/"", &env_gpu_memory_fractions));
+    gpu_memory_fractions = tensorflow::str_util::Split(env_gpu_memory_fractions, ",");
+    if (gpu_memory_fractions.size() < 2) {
+      gpu_memory_fractions.clear();
+      for (int i = 0; i < num_allocators; ++i) {
+        gpu_memory_fractions.push_back(std::to_string(1.0 / num_allocators));
+      }
+    }
+  } else {
+    LOG(INFO) << "[STREAM INFO] share global memory.";
+    float env_gpu_memory_fraction = 1.0;
+    TF_CHECK_OK(ReadFloatFromEnvVar("TF_GPU_MEMORY_FRACTION",
+                    /*default_val=*/1.0, &env_gpu_memory_fraction));
+    for (int i = 0; i < num_allocators; ++i) {
+      gpu_memory_fractions.push_back(std::to_string(env_gpu_memory_fraction));
+    }
   }
+
   allocators.resize(num_allocators);
   for (int i = 0; i < num_allocators; ++i) {
     allocators[i] =
-        GetGPUAllocator(options, tf_device_id, total_bytes, peer_gpu_ids, i);
+        GetGPUAllocator(options, tf_device_id, total_bytes * std::stof(gpu_memory_fractions[i]), peer_gpu_ids, i);
   }
 }
 
