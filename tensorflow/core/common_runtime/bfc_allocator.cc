@@ -33,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/profiler/lib/scoped_memory_debug_annotation.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/protobuf/bfc_memory_map.pb.h"
+#include "tensorflow/core/util/env_var.h"
 
 namespace tensorflow {
 
@@ -127,6 +128,15 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
   // Rounds available_bytes down to the nearest multiple of kMinAllocationSize.
   available_bytes = (available_bytes / kMinAllocationSize) * kMinAllocationSize;
 
+  // >= 0 for setting the MB limit for extend
+  static const int64 extend_limit_mb = [] {
+    int64 limit;
+    TF_CHECK_OK(ReadInt64FromEnvVar("TF_BFC_EXTEND_LIMIT_MB",
+                                         /*default_val=*/-1, &limit));
+    return limit;
+  }();
+  static const size_t extend_limit_bytes = extend_limit_mb * (2 << 19);
+
   // Do we have enough space to handle the client's request?
   // If not, fail immediately.
   if (rounded_bytes > available_bytes) {
@@ -143,7 +153,15 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
   }
 
   // Try allocating.
-  size_t bytes = std::min(curr_region_allocation_bytes_, available_bytes);
+  size_t bytes = curr_region_allocation_bytes_;
+  if (extend_limit_bytes >= 0) {
+    if (extend_limit_bytes >= rounded_bytes) {
+      bytes = std::min(extend_limit_bytes, curr_region_allocation_bytes_);
+    } else {
+      bytes = rounded_bytes;
+    }
+  }
+  bytes = std::min(bytes, available_bytes);
   size_t bytes_received;
   void* mem_addr = sub_allocator_->Alloc(alignment, bytes, &bytes_received);
   if (mem_addr == nullptr && !started_backpedal_) {
