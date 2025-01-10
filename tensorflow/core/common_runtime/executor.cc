@@ -406,6 +406,7 @@ class ExecutorState {
   bool sync_on_finish_;
   const bool run_all_kernels_inline_;
   TensorHolder* tensor_holder_;
+  bool aurora_executor_opt = true;
 
   PropagatorStateType propagator_;
 
@@ -471,6 +472,8 @@ ExecutorState<PropagatorStateType>::ExecutorState(
   for (auto& item : *(immutable_state.stream_wait_list())) {
     stream_wait_flags_.emplace(item, false);
   }
+  TF_CHECK_OK(ReadBoolFromEnvVar("AURORA_EXECUTOR_OPT",
+            /*default_val=*/true, &aurora_executor_opt));
 }
 
 template <class PropagatorStateType>
@@ -675,8 +678,14 @@ void ExecutorState<PropagatorStateType>::ProcessAsync(
     if (s.ok()) {
       propagator_.PropagateOutputs(state->tagged_node, &outputs, &ready);
     }
-    outputs.clear();
-    const bool completed = NodeDone(s, &ready, stats, nullptr);
+    bool completed;
+    if (aurora_executor_opt) {
+      completed = NodeDone(s, &ready, stats, nullptr);
+      outputs.clear();
+    } else {
+      outputs.clear();
+      completed = NodeDone(s, &ready, stats, nullptr);
+    }
     delete state;
     if (completed) ScheduleFinish();
   };
@@ -1256,7 +1265,7 @@ void ExecutorState<PropagatorStateType>::ScheduleReady(
     scheduled_nsec = nodestats::NowInNsec();
   }
 
-  if (run_all_kernels_inline_) {
+  if (run_all_kernels_inline_ || aurora_executor_opt) {
     if (inline_ready == nullptr) {
       // Schedule all ready kernels from a single closure. This ensure that,
       // regardless of the `runner_` implementation, all kernels will run
